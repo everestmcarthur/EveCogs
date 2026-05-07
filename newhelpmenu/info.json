@@ -1,0 +1,30 @@
+{
+    "author": ["everestmcarthur"],
+    "install_msg": "Thanks for installing **New Help Menu v1.0.0** — the ultimate customisable help system!\n\nThe cog automatically replaces your default help command with an interactive, button-driven menu.\n\nGet started:\n• `[p]helpmenu theme <name>` — choose a theme (default, minimal, compact, dark)\n• `[p]helpmenu category create <name> <emoji> <description>` — build custom categories\n• `[p]helpmenu category addcog <category> <CogName>` — assign cogs to categories\n• `[p]helpmenu settings` — view all current settings\n• `[p]helpmenu preview` — preview the menu\n\nFull docs: `[p]help helpmenu`",
+    "name": "NewHelpMenu",
+    "disabled": false,
+    "short": "Fully customisable interactive help menu with categories, buttons, select menus, themes, search & favourites.",
+    "description": "New Help Menu v1.0.0 completely replaces Red's default help formatter with a modern, interactive experience. Features include: custom categories with emoji/colour/thumbnail/image per category, 4 built-in themes (default/minimal/compact/dark) plus full custom mode, button and select-menu navigation, paginated command lists, command search via modal, per-user favourite commands, role-gated category visibility, quick-link buttons (URLs), custom home page fields/images/tagline, per-command detail views with subcommand browsing, cooldown/permission/alias display toggles, DM help mode, ephemeral mode, auto-delete, hidden cogs/commands blacklists, uncategorised section control, and 50+ admin configuration commands.",
+    "tags": [
+        "help",
+        "menu",
+        "buttons",
+        "select",
+        "interactive",
+        "categories",
+        "customise",
+        "customize",
+        "theme",
+        "embed",
+        "search",
+        "favourites",
+        "navigation",
+        "ui",
+        "paginator"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores Discord user IDs and guild IDs for per-user favourite commands and per-guild help menu configuration including categories, themes, and display preferences.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "requirements": []
+}
