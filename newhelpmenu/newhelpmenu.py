@@ -87,16 +87,19 @@ class NewHelpMenu(commands.Cog):
 
         # Store original methods for restoration
         self._original_send: Optional[Callable] = None
-        self._original_help_formatter = None
+        self._original_help_command: Optional[commands.Command] = None
+        self._original_channel_send: Optional[Callable] = None
         self._active_views: Dict[int, ui.LayoutView] = {}  # msg_id -> view
         self._patched = False
 
     async def initialize(self):
-        """Called after cog is added — set up monkey patches."""
+        """Called after cog is added — set up monkey patches and take over help."""
         await self._apply_patches()
+        self._take_over_help()
 
     async def cog_unload(self):
         """Restore everything on unload."""
+        self._restore_help()
         await self._remove_patches()
         # Stop all active views
         for view in self._active_views.values():
@@ -104,50 +107,91 @@ class NewHelpMenu(commands.Cog):
         self._active_views.clear()
 
     # ═══════════════════════════════════════════════════════════════
+    #  HELP COMMAND TAKEOVER
+    # ═══════════════════════════════════════════════════════════════
+
+    def _take_over_help(self):
+        """Remove Red's default help command and register ours."""
+        # Store the original help command so we can restore it
+        existing = self.bot.get_command("help")
+        if existing and existing.cog_name != self.qualified_name:
+            self._original_help_command = existing
+            self.bot.remove_command("help")
+            log.info("NewHelpMenu: Removed default help command")
+
+        # Our help command is registered as part of the cog already
+        # but we need to make sure it's there
+        if not self.bot.get_command("help"):
+            self.bot.add_command(self._help_override)
+            log.info("NewHelpMenu: Registered CV2 help command")
+
+    def _restore_help(self):
+        """Restore the original help command."""
+        # Remove our help command
+        our_help = self.bot.get_command("help")
+        if our_help and our_help.cog_name == self.qualified_name:
+            self.bot.remove_command("help")
+            log.info("NewHelpMenu: Removed CV2 help command")
+
+        # Restore original
+        if self._original_help_command is not None:
+            self.bot.add_command(self._original_help_command)
+            self._original_help_command = None
+            log.info("NewHelpMenu: Restored original help command")
+
+    # ═══════════════════════════════════════════════════════════════
     #  MONKEY PATCHING
     # ═══════════════════════════════════════════════════════════════
 
     async def _apply_patches(self):
-        """Monkey-patch Context.send to intercept embeds."""
+        """Monkey-patch Context.send AND channel.send to intercept embeds globally."""
         if self._patched:
             return
 
-        original_send = commands.Context.send
+        original_ctx_send = commands.Context.send
+        original_channel_send = discord.abc.Messageable.send
 
         cog_ref = self  # closure reference
 
-        async def patched_send(ctx_self, content=None, **kwargs):
-            """Wrapper around Context.send that converts embeds → CV2."""
+        async def _convert_and_send(original_fn, self_obj, content, kwargs):
+            """Shared logic: convert embeds → CV2, call the original fn."""
             try:
-                guild = ctx_self.guild
+                # Resolve the guild from whatever object we're sending to
+                guild = None
+                if isinstance(self_obj, commands.Context):
+                    guild = self_obj.guild
+                elif isinstance(self_obj, (discord.TextChannel, discord.VoiceChannel,
+                                           discord.StageChannel, discord.Thread)):
+                    guild = self_obj.guild
+                elif isinstance(self_obj, discord.Member):
+                    guild = self_obj.guild
+
                 if guild is None:
-                    return await original_send(ctx_self, content, **kwargs)
+                    return await original_fn(self_obj, content, **kwargs)
 
                 settings = await cog_ref.config.guild(guild).all()
 
-                if not settings["enabled"]:
-                    return await original_send(ctx_self, content, **kwargs)
-
-                if not settings["embed_override"]:
-                    return await original_send(ctx_self, content, **kwargs)
+                if not settings["enabled"] or not settings["embed_override"]:
+                    return await original_fn(self_obj, content, **kwargs)
 
                 # Don't intercept if there's already a LayoutView
                 existing_view = kwargs.get("view")
                 if isinstance(existing_view, ui.LayoutView):
-                    return await original_send(ctx_self, content, **kwargs)
+                    return await original_fn(self_obj, content, **kwargs)
 
-                # Check override mode
+                # Check override mode (help_only = don't convert general sends)
                 mode = settings["override_mode"]
                 if mode == "help_only":
-                    return await original_send(ctx_self, content, **kwargs)
+                    return await original_fn(self_obj, content, **kwargs)
 
-                # Check per-cog override
-                cmd = ctx_self.command
-                if cmd and cmd.cog_name:
-                    cog_overrides = settings.get("cog_overrides", {})
-                    if cmd.cog_name in cog_overrides:
-                        if not cog_overrides[cmd.cog_name]:
-                            return await original_send(ctx_self, content, **kwargs)
+                # Check per-cog override (only applies to Context sends)
+                if isinstance(self_obj, commands.Context):
+                    cmd = self_obj.command
+                    if cmd and cmd.cog_name:
+                        cog_overrides = settings.get("cog_overrides", {})
+                        if cmd.cog_name in cog_overrides:
+                            if not cog_overrides[cmd.cog_name]:
+                                return await original_fn(self_obj, content, **kwargs)
 
                 # Check if there are embeds to convert
                 embed = kwargs.pop("embed", None)
@@ -160,7 +204,7 @@ class NewHelpMenu(commands.Cog):
                     embed_list.extend(embeds)
 
                 if not embed_list:
-                    return await original_send(ctx_self, content, **kwargs)
+                    return await original_fn(self_obj, content, **kwargs)
 
                 # Convert embeds to LayoutView
                 accent = settings["accent_color"]
@@ -185,7 +229,7 @@ class NewHelpMenu(commands.Cog):
                 kwargs["view"] = layout
                 kwargs.pop("embed", None)
                 kwargs.pop("embeds", None)
-                msg = await original_send(ctx_self, None, **kwargs)
+                msg = await original_fn(self_obj, None, **kwargs)
 
                 # Track for cleanup
                 if msg:
@@ -195,21 +239,33 @@ class NewHelpMenu(commands.Cog):
 
             except Exception as e:
                 log.warning(f"CV2 conversion failed, falling back to original: {e}")
-                # Restore embed/embeds if we removed them
-                return await original_send(ctx_self, content, **kwargs)
+                return await original_fn(self_obj, content, **kwargs)
 
-        self._original_send = original_send
-        commands.Context.send = patched_send
+        async def patched_ctx_send(ctx_self, content=None, **kwargs):
+            """Wrapper around Context.send."""
+            return await _convert_and_send(original_ctx_send, ctx_self, content, kwargs)
+
+        async def patched_channel_send(channel_self, content=None, **kwargs):
+            """Wrapper around Messageable.send (channels, threads, etc.)."""
+            return await _convert_and_send(original_channel_send, channel_self, content, kwargs)
+
+        self._original_send = original_ctx_send
+        self._original_channel_send = original_channel_send
+        commands.Context.send = patched_ctx_send
+        discord.abc.Messageable.send = patched_channel_send
         self._patched = True
-        log.info("NewHelpMenu: Patched Context.send for embed → CV2 conversion")
+        log.info("NewHelpMenu: Patched Context.send + Messageable.send for global embed → CV2")
 
     async def _remove_patches(self):
         """Restore original methods."""
         if self._original_send:
             commands.Context.send = self._original_send
             self._original_send = None
+        if self._original_channel_send:
+            discord.abc.Messageable.send = self._original_channel_send
+            self._original_channel_send = None
         self._patched = False
-        log.info("NewHelpMenu: Restored original Context.send")
+        log.info("NewHelpMenu: Restored original send methods")
 
     # ═══════════════════════════════════════════════════════════════
     #  HELP SYSTEM
@@ -356,14 +412,14 @@ class NewHelpMenu(commands.Cog):
             pass
 
     # ═══════════════════════════════════════════════════════════════
-    #  HELP COMMAND OVERRIDE
+    #  HELP COMMAND — replaces Red's default
     # ═══════════════════════════════════════════════════════════════
 
-    @commands.command(name="help", hidden=True)
+    @commands.command(name="help")
     async def _help_override(self, ctx: commands.Context, *, thing: str = None):
         """Shows help for the bot, a command, a cog, or a category.
 
-        This overrides the default help when Components V2 is enabled.
+        Powered by Components V2 when enabled.
         """
         if ctx.guild:
             settings = await self.config.guild(ctx.guild).all()
@@ -371,8 +427,42 @@ class NewHelpMenu(commands.Cog):
                 await self._send_cv2_help(ctx, thing)
                 return
 
-        # Fall back to default
-        await ctx.send_help(thing)
+        # Fallback for DMs or when CV2 is disabled:
+        # Use our own basic text fallback since we replaced the original
+        if thing is None:
+            # List all cogs/commands
+            prefix = ctx.clean_prefix
+            lines = [f"**{ctx.bot.user.display_name} — Help**\n"]
+            lines.append(f"Use `{prefix}help <command>` for details.\n")
+            cog_names = sorted(ctx.bot.cogs.keys())
+            for cog_name in cog_names:
+                cog = ctx.bot.get_cog(cog_name)
+                cmds = [c for c in cog.get_commands() if not c.hidden]
+                if cmds:
+                    cmd_names = ", ".join(f"`{c.name}`" for c in sorted(cmds, key=lambda c: c.name))
+                    lines.append(f"**{cog_name}** — {cmd_names}")
+            await ctx.send("\n".join(lines))
+        else:
+            cmd = ctx.bot.get_command(thing)
+            if cmd:
+                prefix = ctx.clean_prefix
+                sig = cmd.signature or ""
+                desc = cmd.help or cmd.short_doc or "No description."
+                text = f"**{prefix}{cmd.qualified_name}** {sig}\n\n{desc}"
+                if cmd.aliases:
+                    text += f"\n\n**Aliases:** {', '.join(cmd.aliases)}"
+                await ctx.send(text)
+            else:
+                cog = ctx.bot.get_cog(thing)
+                if cog:
+                    prefix = ctx.clean_prefix
+                    lines = [f"**{cog.qualified_name}**\n{cog.help or cog.__doc__ or 'No description.'}\n"]
+                    for c in sorted(cog.get_commands(), key=lambda c: c.name):
+                        if not c.hidden:
+                            lines.append(f"`{prefix}{c.qualified_name}` — {c.short_doc or 'No description'}")
+                    await ctx.send("\n".join(lines))
+                else:
+                    await ctx.send(f"No command or category named **{thing}** found.")
 
     # ═══════════════════════════════════════════════════════════════
     #  SETTINGS COMMANDS
