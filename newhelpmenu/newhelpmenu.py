@@ -93,50 +93,19 @@ class NewHelpMenu(commands.Cog):
         self._patched = False
 
     async def initialize(self):
-        """Called after cog is added — set up monkey patches and take over help."""
+        """Called after cog is added — set up monkey patches."""
         await self._apply_patches()
-        self._take_over_help()
 
     async def cog_unload(self):
         """Restore everything on unload."""
-        self._restore_help()
         await self._remove_patches()
         # Stop all active views
         for view in self._active_views.values():
             view.stop()
         self._active_views.clear()
-
-    # ═══════════════════════════════════════════════════════════════
-    #  HELP COMMAND TAKEOVER
-    # ═══════════════════════════════════════════════════════════════
-
-    def _take_over_help(self):
-        """Remove Red's default help command and register ours."""
-        # Store the original help command so we can restore it
-        existing = self.bot.get_command("help")
-        if existing and existing.cog_name != self.qualified_name:
-            self._original_help_command = existing
-            self.bot.remove_command("help")
-            log.info("NewHelpMenu: Removed default help command")
-
-        # Our help command is registered as part of the cog already
-        # but we need to make sure it's there
-        if not self.bot.get_command("help"):
-            self.bot.add_command(self._help_override)
-            log.info("NewHelpMenu: Registered CV2 help command")
-
-    def _restore_help(self):
-        """Restore the original help command."""
-        # Remove our help command
-        our_help = self.bot.get_command("help")
-        if our_help and our_help.cog_name == self.qualified_name:
-            self.bot.remove_command("help")
-            log.info("NewHelpMenu: Removed CV2 help command")
-
-        # Restore original
+        # Restore Red's original help command
         if self._original_help_command is not None:
             self.bot.add_command(self._original_help_command)
-            self._original_help_command = None
             log.info("NewHelpMenu: Restored original help command")
 
     # ═══════════════════════════════════════════════════════════════
@@ -412,25 +381,20 @@ class NewHelpMenu(commands.Cog):
             pass
 
     # ═══════════════════════════════════════════════════════════════
-    #  HELP COMMAND — replaces Red's default
+    #  HELP COMMAND — replaces Red's default (removed in __init__.py)
     # ═══════════════════════════════════════════════════════════════
 
     @commands.command(name="help")
-    async def _help_override(self, ctx: commands.Context, *, thing: str = None):
-        """Shows help for the bot, a command, a cog, or a category.
-
-        Powered by Components V2 when enabled.
-        """
+    async def _help_command(self, ctx: commands.Context, *, thing: str = None):
+        """Shows help for the bot, a command, a cog, or a category."""
         if ctx.guild:
             settings = await self.config.guild(ctx.guild).all()
             if settings["enabled"] and settings["help_override"]:
                 await self._send_cv2_help(ctx, thing)
                 return
 
-        # Fallback for DMs or when CV2 is disabled:
-        # Use our own basic text fallback since we replaced the original
+        # Fallback for DMs or when CV2 is disabled
         if thing is None:
-            # List all cogs/commands
             prefix = ctx.clean_prefix
             lines = [f"**{ctx.bot.user.display_name} — Help**\n"]
             lines.append(f"Use `{prefix}help <command>` for details.\n")
