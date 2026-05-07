@@ -2577,7 +2577,7 @@ class Wormhole(commands.Cog):
     #  NETWORK ANALYTICS
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    @wh.command(name="analytics", aliases=["stats"])
+    @wh.command(name="analytics")
     async def wh_analytics(self, ctx, name: str):
         """View network analytics — activity breakdown, top users, peak hours."""
         name = name.lower(); d = await self._net(name)
