@@ -396,13 +396,16 @@ class NewHelpMenu(commands.Cog):
     @commands.command(name="help")
     async def _help_command(self, ctx: commands.Context, *, thing: str = None):
         """Shows help for the bot, a command, a cog, or a category."""
+        # Always use CV2 help in guilds — this cog IS the help replacement.
+        # The "enabled" toggle only controls global embed conversion.
         if ctx.guild:
-            settings = await self.config.guild(ctx.guild).all()
-            if settings["enabled"] and settings["help_override"]:
+            try:
                 await self._send_cv2_help(ctx, thing)
                 return
+            except Exception as e:
+                log.warning(f"CV2 help failed, using text fallback: {e}")
 
-        # Fallback for DMs or when CV2 is disabled — paginate to stay under 2000 chars
+        # Fallback for DMs or on error — paginate to stay under 2000 chars
         if thing is None:
             prefix = ctx.clean_prefix
             header = f"**{ctx.bot.user.display_name} — Help**\nUse `{prefix}help <command>` for details.\n"
@@ -454,7 +457,11 @@ class NewHelpMenu(commands.Cog):
     @checks.admin_or_permissions(manage_guild=True)
     async def cv2(self, ctx: commands.Context):
         """Components V2 settings and controls."""
-        await ctx.send_help(ctx.command)
+        prefix = ctx.clean_prefix
+        cmds = "\n".join(
+            f"`{prefix}cv2 {c.name}` — {c.short_doc}" for c in sorted(self.cv2.commands, key=lambda c: c.name)
+        )
+        await ctx.send(f"**CV2 Settings**\n{cmds}")
 
     @cv2.command(name="toggle")
     @checks.admin_or_permissions(manage_guild=True)
