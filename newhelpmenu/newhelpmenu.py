@@ -1,1593 +1,930 @@
 """
-New Help Menu v1.0.0 — The ultimate customisable help system for Red-DiscordBot.
+NewHelpMenu — Components V2 mega cog for Red-DiscordBot.
 
-Replaces the default help formatter with an interactive, button/select-menu
-driven experience that server admins can fully tailor: layouts, custom
-categories, per-category icons/colours/descriptions, button styles/labels,
-embed themes, role-gated visibility, pagination, favourites, search, and more.
+Replaces Red's help system, converts all embeds to Components V2,
+and overrides menus/pagination. Toggle on/off, default off.
 
-Every. Single. Aspect. Is. Customisable.
+Requires discord.py 2.6+ (ships with Red 3.5.21+).
 """
-
 from __future__ import annotations
 
 import asyncio
-import datetime
-import math
+import logging
 from collections import defaultdict
-from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import discord
-from discord import ButtonStyle, Interaction, SelectOption
-from discord.ui import Button, Modal, Select, TextInput, View, button, select
+from discord import ui
+from discord.ext import commands as dpy_commands
 from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
-from redbot.core.i18n import Translator
-from redbot.core.utils.chat_formatting import humanize_list, pagify
+from redbot.core.utils.chat_formatting import box, humanize_list, pagify
 
-_ = Translator("NewHelpMenu", __file__)
+from .converter import embed_to_container, embeds_to_layout, view_items_to_action_rows
+from .formatter import (
+    CV2MenuPaginator,
+    HelpPaginatorView,
+    build_bot_help_pages,
+    build_cog_help_page,
+    build_command_help_page,
+)
 
-# ━━━━━━━━━━━━━━━━━━━━━━ DEFAULTS ━━━━━━━━━━━━━━━━━━━━━━
+log = logging.getLogger("red.evecogs.newhelpmenu")
 
-_GUILD_DEFAULTS: Dict[str, Any] = {
-    # ── Global ──
-    "enabled": True,
-    "theme": "default",  # default | minimal | compact | dark | custom
-    "accent_colour": None,
-    "thumbnail": None,
-    "footer_text": "Use the buttons below to navigate • {prefix}help <command> for details",
-    "footer_icon": None,
-    "title_text": "📖 {bot_name} Help",
-    "description": "Welcome! Browse commands by category or search below.",
+# ──────────────────────────── defaults ────────────────────────────
+
+DEFAULT_GUILD: Dict[str, Any] = {
+    # Master toggle — everything is behind this
+    "enabled": False,
+    # Sub-toggles
+    "help_override": True,
+    "embed_override": True,
+    "menu_override": True,
+    # Appearance
+    "accent_color": 0x5865F2,  # Blurple
+    "show_thumbnail": True,
+    "show_footer": True,
+    "compact_fields": False,
+    "bot_thumbnail_url": "",  # Empty = use bot avatar
+    # Help system
+    "categories": {},  # {cat_name: [cog_name, ...]}
+    "category_emojis": {},  # {cat_name: emoji}
+    "blacklisted_cogs": [],
+    "blacklisted_commands": [],
     "show_hidden": False,
-    "show_aliases": True,
-    "show_cooldown": True,
-    "show_permissions": True,
-    "show_signature": True,
-    "dm_help": False,
-    "ephemeral": False,
-    "delete_after": 0,
-    "timeout": 180,
-    "max_commands_per_page": 8,
-    "sort_commands": True,
-    "sort_categories": True,
-    "timestamp": True,
-    # ── Layout ──
-    "layout": "default",  # default | compact | two_column | list | minimal | detailed
-    "home_layout": "list",  # list | grid | minimal
-    "category_layout": "fields",  # fields | description | inline | numbered | table
-    "command_separator": "\n",  # separator between commands in description layout
-    "show_command_count": True,
-    "category_columns": 1,  # 1 = full-width fields, 2 = inline fields (two_column), 3 = triple
-    "show_category_banner": True,
-    "compact_delimiter": " • ",
-    # ── Navigation ──
-    "use_select_menu": True,
-    "use_buttons": True,
-    "button_style": "primary",
-    "page_button_style": "secondary",
-    "nav_style": "full",  # full | compact | arrows_only | select_only
-    "show_home_button": True,
-    "show_close_button": True,
-    "show_page_counter": True,
-    # ── Button labels ──
-    "btn_home_label": "Home",
-    "btn_home_emoji": "🏠",
-    "btn_prev_emoji": "◀️",
-    "btn_next_emoji": "▶️",
-    "btn_search_label": "Search",
-    "btn_search_emoji": "🔍",
-    "btn_fav_label": "Favourites",
-    "btn_fav_emoji": "⭐",
-    "btn_close_emoji": "✖️",
-    # ── Home page ──
-    "home_fields": [],
-    "home_image": None,
-    "tagline": "",
-    # ── Categories ──
-    "categories": {},
-    "uncategorised_label": "🔧 Other",
-    "uncategorised_description": "Commands not assigned to a category.",
-    "uncategorised_emoji": "🔧",
-    "hide_uncategorised": False,
-    # ── Blacklists ──
-    "hidden_cogs": [],
-    "hidden_commands": [],
-    # ── Favourites ──
-    "allow_favourites": True,
-    # ── Quick links ──
-    "quick_links": [],
-    # ── Search ──
-    "search_enabled": True,
-    "search_placeholder": "Type a command name or keyword…",
-    # ── Embed author ──
-    "show_author": False,
-    "author_name": "{bot_name}",
-    "author_icon": None,
-    # ── Command detail ──
-    "detail_show_parent": True,
-    "detail_show_cog": True,
-    "detail_show_full_help": True,
-    # ── Reactions (legacy navigation) ──
-    "reaction_nav": False,
+    "help_timeout": 180,
+    "help_in_dm": False,
+    # Override scope
+    "override_mode": "all",  # "all", "help_only", "commands_only"
+    # Per-cog overrides: {cog_name: True/False}
+    "cog_overrides": {},
 }
 
-_MEMBER_DEFAULTS: Dict[str, Any] = {
-    "favourites": [],
+DEFAULT_GLOBAL: Dict[str, Any] = {
+    "schema_version": 1,
 }
 
-_BSTYLE = {
-    "primary": ButtonStyle.primary,
-    "secondary": ButtonStyle.secondary,
-    "success": ButtonStyle.success,
-    "danger": ButtonStyle.danger,
-    "blurple": ButtonStyle.primary,
-    "grey": ButtonStyle.secondary,
-    "gray": ButtonStyle.secondary,
-    "green": ButtonStyle.success,
-    "red": ButtonStyle.danger,
-}
-
-_THEMES: Dict[str, Dict[str, Any]] = {
-    "default": {},
-    "minimal": {
-        "thumbnail": "",
-        "footer_text": "{prefix}help <command>",
-        "timestamp": False,
-        "use_select_menu": False,
-        "button_style": "secondary",
-        "description": "",
-        "layout": "minimal",
-        "home_layout": "minimal",
-        "category_layout": "description",
-        "nav_style": "arrows_only",
-        "show_author": False,
-        "show_category_banner": False,
-    },
-    "compact": {
-        "max_commands_per_page": 15,
-        "show_signature": False,
-        "show_cooldown": False,
-        "show_permissions": False,
-        "use_select_menu": False,
-        "description": "",
-        "layout": "compact",
-        "category_layout": "table",
-        "compact_delimiter": " · ",
-        "nav_style": "compact",
-    },
-    "dark": {
-        "accent_colour": 0x2F3136,
-        "button_style": "secondary",
-        "page_button_style": "secondary",
-        "layout": "default",
-    },
-}
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━ HELPERS ━━━━━━━━━━━━━━━━━━━━━━
-
-def _style(name: str) -> ButtonStyle:
-    return _BSTYLE.get(name, ButtonStyle.primary)
-
-
-def _colour(val, ctx: commands.Context) -> discord.Colour:
-    if val is not None:
-        return discord.Colour(int(val))
-    return ctx.me.colour if ctx.guild else discord.Colour.blurple()
-
-
-def _fmt(template: str, ctx: commands.Context) -> str:
-    if not template:
-        return ""
-    prefix = ctx.clean_prefix
-    bot_name = ctx.me.display_name if ctx.guild else ctx.bot.user.display_name
-    return template.format(prefix=prefix, bot_name=bot_name)
-
-
-def _sig(cmd: commands.Command, show: bool) -> str:
-    if not show:
-        return f"`{cmd.qualified_name}`"
-    sig = cmd.signature.strip()
-    if sig:
-        return f"`{cmd.qualified_name} {sig}`"
-    return f"`{cmd.qualified_name}`"
-
-
-def _trunc(text: str, n: int = 100) -> str:
-    return text if len(text) <= n else text[: n - 1] + "…"
-
-
-async def _visible_cmds(
-    cmds, ctx: commands.Context, show_hidden: bool,
-    hidden_commands: list, sort: bool,
-) -> list:
-    out = []
-    for cmd in cmds:
-        if cmd.qualified_name in hidden_commands:
-            continue
-        if cmd.hidden and not show_hidden:
-            continue
-        try:
-            ok = await cmd.can_run(ctx)
-        except Exception:
-            ok = False
-        if ok:
-            out.append(cmd)
-    if sort:
-        out.sort(key=lambda c: c.qualified_name)
-    return out
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━ EMBED LAYOUTS ━━━━━━━━━━━━━━━━━━━━━━
-
-def _layout_fields(
-    embed: discord.Embed, cmds: list, conf: dict, favourites: list, columns: int = 1
-) -> discord.Embed:
-    """Standard embed fields layout — one field per command."""
-    inline = columns >= 2
-    for cmd in cmds:
-        name = _sig(cmd, conf.get("show_signature", True))
-        parts = []
-        brief = cmd.short_doc or "No description."
-        parts.append(brief)
-        if conf.get("show_aliases") and cmd.aliases:
-            parts.append(f"**Aliases:** {humanize_list([f'`{a}`' for a in cmd.aliases])}")
-        if conf.get("show_cooldown") and cmd.cooldown:
-            parts.append(f"**Cooldown:** {cmd.cooldown.rate}/{cmd.cooldown.per:.0f}s")
-        if conf.get("show_permissions") and hasattr(cmd, "requires") and cmd.requires.privilege_level:
-            pl = cmd.requires.privilege_level
-            if pl.name != "NONE":
-                parts.append(f"**Requires:** {pl.name.replace('_', ' ').title()}")
-        if isinstance(cmd, commands.Group):
-            parts.append(f"*{len(cmd.commands)} subcommand(s)*")
-        if cmd.qualified_name in favourites:
-            parts.insert(0, "⭐")
-        embed.add_field(name=name, value="\n".join(parts), inline=inline)
-    # Pad for alignment when using columns
-    if inline and len(cmds) % columns != 0:
-        for _ in range(columns - (len(cmds) % columns)):
-            embed.add_field(name="​", value="​", inline=True)
-    return embed
-
-
-def _layout_description(
-    embed: discord.Embed, cmds: list, conf: dict, favourites: list
-) -> discord.Embed:
-    """All commands listed in the embed description."""
-    sep = conf.get("command_separator", "\n")
-    lines = []
-    for cmd in cmds:
-        fav = "⭐ " if cmd.qualified_name in favourites else ""
-        sig = _sig(cmd, conf.get("show_signature", True))
-        brief = cmd.short_doc or "No description."
-        lines.append(f"{fav}{sig} — {brief}")
-    desc = embed.description or ""
-    embed.description = desc + "\n" + sep.join(lines)
-    return embed
-
-
-def _layout_inline(
-    embed: discord.Embed, cmds: list, conf: dict, favourites: list
-) -> discord.Embed:
-    """Two-column: name | description."""
-    for cmd in cmds:
-        fav = "⭐ " if cmd.qualified_name in favourites else ""
-        embed.add_field(
-            name=f"{fav}`{cmd.qualified_name}`",
-            value=cmd.short_doc or "No description.",
-            inline=True,
-        )
-    if len(cmds) % 2 != 0:
-        embed.add_field(name="​", value="​", inline=True)
-    return embed
-
-
-def _layout_numbered(
-    embed: discord.Embed, cmds: list, conf: dict, favourites: list
-) -> discord.Embed:
-    """Numbered list in description."""
-    lines = []
-    for i, cmd in enumerate(cmds, 1):
-        fav = "⭐ " if cmd.qualified_name in favourites else ""
-        sig = _sig(cmd, conf.get("show_signature", True))
-        brief = cmd.short_doc or "No description."
-        lines.append(f"**{i}.** {fav}{sig}\n{brief}")
-    desc = embed.description or ""
-    embed.description = desc + "\n" + "\n".join(lines)
-    return embed
-
-
-def _layout_table(
-    embed: discord.Embed, cmds: list, conf: dict, favourites: list
-) -> discord.Embed:
-    """Compact code-block table."""
-    rows = []
-    max_name = max((len(cmd.qualified_name) for cmd in cmds), default=10)
-    max_name = min(max_name, 20)
-    for cmd in cmds:
-        name = cmd.qualified_name.ljust(max_name)[:max_name]
-        brief = _trunc(cmd.short_doc or "No description.", 40)
-        rows.append(f"{name}  {brief}")
-    desc = embed.description or ""
-    table = "```\n" + "\n".join(rows) + "\n```"
-    embed.description = desc + "\n" + table
-    return embed
-
-
-_CATEGORY_LAYOUTS = {
-    "fields": _layout_fields,
-    "description": _layout_description,
-    "inline": _layout_inline,
-    "numbered": _layout_numbered,
-    "table": _layout_table,
-}
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━ VIEWS ━━━━━━━━━━━━━━━━━━━━━━
-
-class HelpView(View):
-    """Main interactive help view."""
-
-    def __init__(
-        self, cog: "NewHelpMenu", ctx: commands.Context,
-        conf: dict, categories: dict, all_cmds: dict,
-        *, favourites: list,
-    ):
-        super().__init__(timeout=conf.get("timeout", 180))
-        self.cog = cog
-        self.ctx = ctx
-        self.conf = conf
-        self.categories = categories
-        self.all_cmds = all_cmds
-        self.favourites = favourites
-        self.page: str = "__home__"
-        self.idx: int = 0
-        self.message: Optional[discord.Message] = None
-        self._build()
-
-    @property
-    def _pages(self) -> int:
-        if self.page in ("__home__", "__favourites__", "__search__"):
-            return 1
-        per = self.conf.get("max_commands_per_page", 8)
-        return max(1, math.ceil(len(self.all_cmds.get(self.page, [])) / per))
-
-    # ── Build UI ──
-
-    def _build(self):
-        self.clear_items()
-        c = self.conf
-        nav = c.get("nav_style", "full")
-
-        # Row 0: Select menu
-        if c.get("use_select_menu") and nav not in ("arrows_only",) and self.categories:
-            opts = [SelectOption(label="🏠 Home", value="__home__", default=self.page == "__home__")]
-            for cn, cd in self.categories.items():
-                lbl = cd.get("label", cn)[:25]
-                desc = _trunc(cd.get("description", ""), 50) or None
-                o = SelectOption(label=lbl, value=cn, description=desc, default=self.page == cn)
-                if cd.get("emoji"):
-                    try:
-                        o.emoji = cd["emoji"]
-                    except Exception:
-                        pass
-                opts.append(o)
-            if c.get("allow_favourites") and self.favourites:
-                opts.append(SelectOption(label="⭐ Favourites", value="__favourites__", default=self.page == "__favourites__"))
-            self.add_item(_CatSelect(opts[:25]))
-
-        # Row 1: Category buttons (when no select)
-        if c.get("use_buttons") and not c.get("use_select_menu"):
-            style = _style(c.get("button_style", "primary"))
-            if c.get("show_home_button", True):
-                b = Button(style=ButtonStyle.secondary, label=c.get("btn_home_label", "Home"),
-                           emoji=c.get("btn_home_emoji", "🏠"), custom_id="nhm_home", row=0)
-                b.callback = self._go_home
-                self.add_item(b)
-            for i, (cn, cd) in enumerate(self.categories.items()):
-                if i >= 4:
-                    break
-                b = Button(style=style, label=cd.get("label", cn)[:20],
-                           emoji=cd.get("emoji") or None, custom_id=f"nhm_c_{cn}", row=0)
-                b.callback = self._mk_cat(cn)
-                self.add_item(b)
-
-        # Row 2: Pagination
-        ps = _style(c.get("page_button_style", "secondary"))
-        total = self._pages
-
-        if nav != "select_only":
-            pb = Button(style=ps, emoji=c.get("btn_prev_emoji", "◀️"),
-                        custom_id="nhm_prev", disabled=self.idx <= 0, row=2)
-            pb.callback = self._prev
-            self.add_item(pb)
-
-            if c.get("show_page_counter", True):
-                self.add_item(Button(style=ButtonStyle.secondary, label=f"{self.idx+1}/{total}",
-                                     custom_id="nhm_pg", disabled=True, row=2))
-
-            nb = Button(style=ps, emoji=c.get("btn_next_emoji", "▶️"),
-                        custom_id="nhm_next", disabled=self.idx >= total - 1, row=2)
-            nb.callback = self._next
-            self.add_item(nb)
-
-        # Row 3: Utilities
-        if c.get("search_enabled"):
-            sb = Button(style=ButtonStyle.secondary, emoji=c.get("btn_search_emoji", "🔍"),
-                        label=c.get("btn_search_label", "Search"), custom_id="nhm_srch", row=3)
-            sb.callback = self._search
-            self.add_item(sb)
-        if c.get("allow_favourites"):
-            fb = Button(style=ButtonStyle.secondary, emoji=c.get("btn_fav_emoji", "⭐"),
-                        label=c.get("btn_fav_label", "Favourites"), custom_id="nhm_fav", row=3)
-            fb.callback = self._favs
-            self.add_item(fb)
-        if c.get("show_close_button", True):
-            cb = Button(style=ButtonStyle.danger, emoji=c.get("btn_close_emoji", "✖️"),
-                        custom_id="nhm_cls", row=3)
-            cb.callback = self._close
-            self.add_item(cb)
-
-        # Row 4: Quick links
-        for ql in (c.get("quick_links") or [])[:3]:
-            self.add_item(Button(style=ButtonStyle.link, label=ql.get("label", "Link")[:40],
-                                 url=ql.get("url", "https://discord.com"),
-                                 emoji=ql.get("emoji") or None, row=4))
-
-    # ── Embeds ──
-
-    def _base(self, *, title=None, colour=None) -> discord.Embed:
-        c = self.conf
-        col = colour if colour is not None else _colour(c.get("accent_colour"), self.ctx).value
-        e = discord.Embed(colour=discord.Colour(col))
-        if title:
-            e.title = title
-        if c.get("timestamp"):
-            e.timestamp = datetime.datetime.now(datetime.timezone.utc)
-        ft = _fmt(c.get("footer_text", ""), self.ctx)
-        fi = c.get("footer_icon")
-        if ft:
-            if fi:
-                e.set_footer(text=ft, icon_url=fi)
-            else:
-                e.set_footer(text=ft)
-        if c.get("show_author"):
-            an = _fmt(c.get("author_name", "{bot_name}"), self.ctx)
-            ai = c.get("author_icon") or (self.ctx.me.display_avatar.url if self.ctx.me.display_avatar else None)
-            if ai:
-                e.set_author(name=an, icon_url=ai)
-            else:
-                e.set_author(name=an)
-        return e
-
-    def _home_embed(self) -> discord.Embed:
-        c = self.conf
-        e = self._base(title=_fmt(c.get("title_text", "Help"), self.ctx))
-        parts = []
-        if c.get("tagline"):
-            parts.append(f"*{c['tagline']}*\n")
-        if c.get("description"):
-            parts.append(_fmt(c["description"], self.ctx))
-
-        hl = c.get("home_layout", "list")
-        parts.append("")
-        for cn, cd in self.categories.items():
-            emoji = cd.get("emoji", "📁")
-            label = cd.get("label", cn)
-            desc = cd.get("description", "")
-            count = len(self.all_cmds.get(cn, []))
-            cnt = f" `({count})`" if c.get("show_command_count", True) else ""
-
-            if hl == "grid":
-                parts.append(f"{emoji} **{label}**{cnt}")
-            elif hl == "minimal":
-                parts.append(f"`{label}`{cnt}")
-            else:  # list
-                if desc:
-                    parts.append(f"{emoji} **{label}** — {desc}{cnt}")
-                else:
-                    parts.append(f"{emoji} **{label}**{cnt}")
-
-        e.description = "\n".join(parts)
-
-        thumb = c.get("thumbnail")
-        if thumb:
-            e.set_thumbnail(url=thumb)
-        elif thumb is None and self.ctx.me.display_avatar:
-            e.set_thumbnail(url=self.ctx.me.display_avatar.url)
-
-        if c.get("home_image"):
-            e.set_image(url=c["home_image"])
-
-        for f in c.get("home_fields", []):
-            e.add_field(name=f.get("name", "​"), value=f.get("value", "​"), inline=f.get("inline", False))
-        return e
-
-    def _cat_embed(self, cat: str) -> discord.Embed:
-        cd = self.categories.get(cat, {})
-        c = self.conf
-        col = cd.get("colour") or c.get("accent_colour")
-        emoji = cd.get("emoji", "📁")
-        label = cd.get("label", cat)
-        e = self._base(title=f"{emoji} {label}" if c.get("show_category_banner", True) else label,
-                       colour=_colour(col, self.ctx).value)
-        if cd.get("description"):
-            e.description = cd["description"] + "\n"
-        else:
-            e.description = ""
-        if cd.get("thumbnail"):
-            e.set_thumbnail(url=cd["thumbnail"])
-        if cd.get("image"):
-            e.set_image(url=cd["image"])
-
-        cmds = self.all_cmds.get(cat, [])
-        per = c.get("max_commands_per_page", 8)
-        page_cmds = cmds[self.idx * per: (self.idx + 1) * per]
-
-        layout_name = c.get("category_layout", "fields")
-        layout_fn = _CATEGORY_LAYOUTS.get(layout_name, _layout_fields)
-        if layout_fn == _layout_fields:
-            cols = c.get("category_columns", 1)
-            _layout_fields(e, page_cmds, c, self.favourites, cols)
-        else:
-            layout_fn(e, page_cmds, c, self.favourites)
-
-        total = self._pages
-        if total > 1:
-            e.description = (e.description or "") + f"\n*Page {self.idx + 1}/{total}*"
-        return e
-
-    def _favs_embed(self) -> discord.Embed:
-        e = self._base(title="⭐ Your Favourite Commands")
-        if not self.favourites:
-            e.description = "No favourites yet! Use ⭐ on a command to add one."
-            return e
-        lines = []
-        for qn in self.favourites:
-            cmd = self.ctx.bot.get_command(qn)
-            if cmd:
-                lines.append(f"{_sig(cmd, self.conf.get('show_signature', True))} — {cmd.short_doc or 'No description.'}")
-            else:
-                lines.append(f"`{qn}` — *not found*")
-        e.description = "\n\n".join(lines[:20])
-        return e
-
-    def _search_embed(self, query: str, results: list) -> discord.Embed:
-        e = self._base(title=f"🔍 Search: \"{query}\"")
-        if not results:
-            e.description = "No commands found."
-            return e
-        lines = []
-        for cmd in results[:15]:
-            cat = next((cn for cn, cl in self.all_cmds.items() if cmd in cl), "Other")
-            lines.append(f"{_sig(cmd, self.conf.get('show_signature', True))} — *{cat}*\n{cmd.short_doc or 'No description.'}")
-        e.description = "\n\n".join(lines)
-        e.set_footer(text=f"{len(results)} result(s)")
-        return e
-
-    def embed(self) -> discord.Embed:
-        if self.page == "__home__":
-            return self._home_embed()
-        elif self.page == "__favourites__":
-            return self._favs_embed()
-        else:
-            return self._cat_embed(self.page)
-
-    def detail_embed(self, cmd: commands.Command) -> discord.Embed:
-        c = self.conf
-        e = self._base(title=f"📄 {cmd.qualified_name}")
-        parts = [f"```\n{self.ctx.clean_prefix}{cmd.qualified_name} {cmd.signature}\n```"]
-        if c.get("detail_show_full_help"):
-            parts.append(cmd.help or cmd.short_doc or "No description.")
-        else:
-            parts.append(cmd.short_doc or "No description.")
-        if c.get("show_aliases") and cmd.aliases:
-            parts.append(f"\n**Aliases:** {humanize_list([f'`{a}`' for a in cmd.aliases])}")
-        if c.get("show_cooldown") and cmd.cooldown:
-            parts.append(f"**Cooldown:** {cmd.cooldown.rate}/{cmd.cooldown.per:.0f}s ({cmd.cooldown.type.name})")
-        if c.get("show_permissions") and hasattr(cmd, "requires") and cmd.requires.privilege_level:
-            pl = cmd.requires.privilege_level
-            if pl.name != "NONE":
-                parts.append(f"**Required Level:** {pl.name.replace('_', ' ').title()}")
-        if isinstance(cmd, commands.Group):
-            subs = sorted(cmd.commands, key=lambda x: x.name)
-            sub_lines = [f"`{s.qualified_name}` — {s.short_doc or 'No description.'}" for s in subs[:20]]
-            parts.append(f"\n**Subcommands ({len(cmd.commands)}):**\n" + "\n".join(sub_lines))
-        if c.get("detail_show_parent") and cmd.parent:
-            parts.append(f"\n**Parent:** `{cmd.parent.qualified_name}`")
-        if c.get("detail_show_cog") and cmd.cog:
-            parts.append(f"**Cog:** {cmd.cog.qualified_name}")
-        if cmd.qualified_name in self.favourites:
-            parts.append("\n⭐ *In your favourites*")
-        e.description = "\n".join(parts)
-        return e
-
-    # ── Callbacks ──
-
-    async def _go_home(self, i: Interaction):
-        self.page, self.idx = "__home__", 0
-        self._build()
-        await i.response.edit_message(embed=self.embed(), view=self)
-
-    def _mk_cat(self, name):
-        async def cb(i: Interaction):
-            self.page, self.idx = name, 0
-            self._build()
-            await i.response.edit_message(embed=self.embed(), view=self)
-        return cb
-
-    async def _prev(self, i: Interaction):
-        if self.idx > 0:
-            self.idx -= 1
-        self._build()
-        await i.response.edit_message(embed=self.embed(), view=self)
-
-    async def _next(self, i: Interaction):
-        if self.idx < self._pages - 1:
-            self.idx += 1
-        self._build()
-        await i.response.edit_message(embed=self.embed(), view=self)
-
-    async def _search(self, i: Interaction):
-        await i.response.send_modal(_SearchModal(self))
-
-    async def _favs(self, i: Interaction):
-        self.page, self.idx = "__favourites__", 0
-        self._build()
-        await i.response.edit_message(embed=self.embed(), view=self)
-
-    async def _close(self, i: Interaction):
-        await i.response.edit_message(view=None)
-        self.stop()
-
-    async def interaction_check(self, i: Interaction) -> bool:
-        if i.user.id != self.ctx.author.id:
-            await i.response.send_message("Run the help command yourself!", ephemeral=True)
-            return False
-        return True
-
-    async def on_timeout(self):
-        if self.message:
-            try:
-                await self.message.edit(view=None)
-            except Exception:
-                pass
-
-
-class _CatSelect(Select):
-    def __init__(self, opts):
-        super().__init__(placeholder="Select a category…", options=opts, custom_id="nhm_sel", row=1)
-
-    async def callback(self, i: Interaction):
-        v: HelpView = self.view
-        val = self.values[0]
-        v.page = val if val != "__home__" else "__home__"
-        if val == "__favourites__":
-            v.page = "__favourites__"
-        v.idx = 0
-        v._build()
-        await i.response.edit_message(embed=v.embed(), view=v)
-
-
-class _SearchModal(Modal):
-    query = TextInput(label="Search commands", placeholder="Type a command name or keyword…", max_length=100)
-
-    def __init__(self, hv: HelpView):
-        super().__init__(title="🔍 Search Commands")
-        self.hv = hv
-        self.query.placeholder = hv.conf.get("search_placeholder", "Type a command name or keyword…")
-
-    async def on_submit(self, i: Interaction):
-        q = self.query.value.lower().strip()
-        seen, results = set(), []
-        for cl in self.hv.all_cmds.values():
-            for cmd in cl:
-                if cmd.qualified_name in seen:
-                    continue
-                if (q in cmd.qualified_name.lower() or q in (cmd.short_doc or "").lower()
-                        or q in (cmd.help or "").lower() or any(q in a.lower() for a in cmd.aliases)):
-                    seen.add(cmd.qualified_name)
-                    results.append(cmd)
-        self.hv.page = "__search__"
-        self.hv._build()
-        await i.response.edit_message(embed=self.hv._search_embed(self.query.value, results), view=self.hv)
-
-
-class _DetailView(View):
-    def __init__(self, hv: HelpView, cmd: commands.Command):
-        super().__init__(timeout=120)
-        self.hv, self.cmd = hv, cmd
-        self._build()
-
-    def _build(self):
-        self.clear_items()
-        b = Button(style=ButtonStyle.secondary, label="← Back", emoji="🏠", custom_id="d_back", row=0)
-        b.callback = self._back
-        self.add_item(b)
-
-        is_fav = self.cmd.qualified_name in self.hv.favourites
-        f = Button(style=ButtonStyle.success if is_fav else ButtonStyle.secondary,
-                   label="Unfavourite" if is_fav else "Favourite", emoji="⭐", custom_id="d_fav", row=0)
-        f.callback = self._fav
-        self.add_item(f)
-
-        if isinstance(self.cmd, commands.Group) and self.cmd.commands:
-            s = Button(style=ButtonStyle.primary, label=f"Subcommands ({len(self.cmd.commands)})",
-                       emoji="📂", custom_id="d_sub", row=0)
-            s.callback = self._subs
-            self.add_item(s)
-
-    async def _back(self, i: Interaction):
-        self.hv._build()
-        await i.response.edit_message(embed=self.hv.embed(), view=self.hv)
-        self.stop()
-
-    async def _fav(self, i: Interaction):
-        qn = self.cmd.qualified_name
-        if qn in self.hv.favourites:
-            self.hv.favourites.remove(qn)
-        else:
-            self.hv.favourites.append(qn)
-        if i.guild:
-            async with self.hv.cog.config.member_from_ids(i.guild.id, i.user.id).favourites() as fv:
-                fv.clear()
-                fv.extend(self.hv.favourites)
-        self._build()
-        await i.response.edit_message(embed=self.hv.detail_embed(self.cmd), view=self)
-
-    async def _subs(self, i: Interaction):
-        e = self.hv._base(title=f"📂 {self.cmd.qualified_name} — Subcommands")
-        subs = sorted(self.cmd.commands, key=lambda c: c.name)
-        e.description = "\n\n".join(
-            f"{_sig(c, True)}\n{c.short_doc or 'No description.'}" for c in subs[:20]
-        ) or "None."
-        await i.response.edit_message(embed=e, view=self)
-
-    async def interaction_check(self, i: Interaction) -> bool:
-        if i.user.id != self.hv.ctx.author.id:
-            await i.response.send_message("Not your help menu!", ephemeral=True)
-            return False
-        return True
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━ FORMATTER ━━━━━━━━━━━━━━━━━━━━━━
-
-class _Formatter(commands.help.RedHelpFormatter):
-    def __init__(self, cog: "NewHelpMenu"):
-        self.cog = cog
-
-    async def format_bot_help(self, ctx, **kw):
-        await self.cog._send_help(ctx)
-
-    async def format_cog_help(self, ctx, obj, **kw):
-        await self.cog._send_help(ctx, focus_cog=obj.qualified_name)
-
-    async def format_command_help(self, ctx, obj, **kw):
-        await self.cog._send_cmd_help(ctx, obj)
-
-    # Red may also call send_help directly — override to route properly
-    async def send_help(self, ctx, help_for=None, *, from_help_command=False, help_settings=None, **kw):
-        if help_for is None:
-            return await self.format_bot_help(ctx)
-        if isinstance(help_for, str):
-            help_for = ctx.bot.get_cog(help_for) or ctx.bot.get_command(help_for)
-            if help_for is None:
-                await ctx.send("No command or category found.")
-                return
-        if isinstance(help_for, commands.Cog):
-            return await self.format_cog_help(ctx, help_for)
-        if isinstance(help_for, commands.Command):
-            return await self.format_command_help(ctx, help_for)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━ COG ━━━━━━━━━━━━━━━━━━━━━━━━
 
 class NewHelpMenu(commands.Cog):
-    """Fully customisable interactive help menu with categories, buttons, select menus,
-    layouts, themes, search, favourites, and total configurability over every visual element."""
+    """Components V2 help menu + global embed/menu override.
+
+    Replaces Red's help system and optionally converts ALL bot embeds
+    and menus into Discord Components V2 layouts.
+
+    **Toggle on/off with `[p]cv2 toggle` (off by default).**
+    """
 
     __version__ = "1.0.0"
     __author__ = "everestmcarthur"
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=1_987_654_321, force_registration=True)
-        self.config.register_guild(**_GUILD_DEFAULTS)
-        self.config.register_member(**_MEMBER_DEFAULTS)
-        self._old_fmt = None
+        self.config = Config.get_conf(
+            self, identifier=7283901647, force_registration=True
+        )
+        self.config.register_guild(**DEFAULT_GUILD)
+        self.config.register_global(**DEFAULT_GLOBAL)
 
-    async def cog_load(self):
-        self._old_fmt = self.bot._help_formatter
-        self.bot._help_formatter = _Formatter(self)
+        # Store original methods for restoration
+        self._original_send: Optional[Callable] = None
+        self._original_help_formatter = None
+        self._active_views: Dict[int, ui.LayoutView] = {}  # msg_id -> view
+        self._patched = False
+
+    async def initialize(self):
+        """Called after cog is added — set up monkey patches."""
+        await self._apply_patches()
 
     async def cog_unload(self):
-        if self._old_fmt:
-            self.bot._help_formatter = self._old_fmt
+        """Restore everything on unload."""
+        await self._remove_patches()
+        # Stop all active views
+        for view in self._active_views.values():
+            view.stop()
+        self._active_views.clear()
 
-    # ── Config helpers ──
+    # ═══════════════════════════════════════════════════════════════
+    #  MONKEY PATCHING
+    # ═══════════════════════════════════════════════════════════════
 
-    async def _conf(self, guild) -> dict:
-        if guild is None:
-            return deepcopy(_GUILD_DEFAULTS)
-        raw = await self.config.guild(guild).all()
-        theme = raw.get("theme", "default")
-        if theme in _THEMES and theme != "custom":
-            m = deepcopy(raw)
-            for k, v in _THEMES[theme].items():
-                if m.get(k) is None or m.get(k) == _GUILD_DEFAULTS.get(k):
-                    m[k] = v
-            return m
-        return raw
-
-    async def _cats(self, ctx, conf, *, focus_cog=None):
-        custom = conf.get("categories", {})
-        hcogs = conf.get("hidden_cogs", [])
-        hcmds = conf.get("hidden_commands", [])
-        sh = conf.get("show_hidden", False)
-        sc = conf.get("sort_commands", True)
-        scat = conf.get("sort_categories", True)
-
-        cog2cat = {}
-        for cn, cd in custom.items():
-            for cg in cd.get("cogs", []):
-                cog2cat[cg] = cn
-
-        cats: Dict[str, dict] = {}
-        all_c: Dict[str, list] = defaultdict(list)
-
-        for cname, cobj in self.bot.cogs.items():
-            if cname in hcogs or (focus_cog and cname != focus_cog):
-                continue
-            top = await _visible_cmds(list(cobj.get_commands()), ctx, sh, hcmds, sc)
-            if not top:
-                continue
-            cat = cog2cat.get(cname)
-            if cat and cat in custom:
-                if cat not in cats:
-                    cats[cat] = deepcopy(custom[cat])
-                all_c[cat].extend(top)
-            else:
-                if cname not in cats:
-                    doc = ((cobj.__doc__ or "").strip().split("\n")[0]) if cobj.__doc__ else ""
-                    cats[cname] = {"label": cname, "emoji": None, "description": _trunc(doc, 80),
-                                   "colour": None, "thumbnail": None, "image": None,
-                                   "cogs": [cname], "order": 999, "hidden": False, "required_role": None}
-                all_c[cname].extend(top)
-
-        # no-cog commands
-        nc = await _visible_cmds([c for c in self.bot.commands if c.cog is None], ctx, sh, hcmds, sc)
-        if nc and not conf.get("hide_uncategorised"):
-            lbl = conf.get("uncategorised_label", "🔧 Other")
-            cats[lbl] = {"label": lbl, "emoji": conf.get("uncategorised_emoji", "🔧"),
-                         "description": conf.get("uncategorised_description", ""),
-                         "colour": None, "thumbnail": None, "image": None, "cogs": [],
-                         "order": 9999, "hidden": False, "required_role": None}
-            all_c[lbl] = nc
-
-        # Role filter
-        if ctx.guild and hasattr(ctx.author, "roles"):
-            rids = {r.id for r in ctx.author.roles}
-            rm = [cn for cn, cd in cats.items() if (cd.get("required_role") and cd["required_role"] not in rids) or cd.get("hidden")]
-            for r in rm:
-                cats.pop(r, None)
-                all_c.pop(r, None)
-
-        if scat:
-            cats = dict(sorted(cats.items(), key=lambda kv: (kv[1].get("order", 999), kv[0])))
-        return cats, dict(all_c)
-
-    # ── Send ──
-
-    async def _send_help(self, ctx, *, focus_cog=None):
-        conf = await self._conf(ctx.guild)
-        if not conf.get("enabled"):
-            if self._old_fmt:
-                return await self._old_fmt.format_bot_help(ctx, {})
+    async def _apply_patches(self):
+        """Monkey-patch Context.send to intercept embeds."""
+        if self._patched:
             return
-        cats, ac = await self._cats(ctx, conf, focus_cog=focus_cog)
-        favs = (await self.config.member(ctx.author).favourites()) if ctx.guild and conf.get("allow_favourites") else []
-        view = HelpView(self, ctx, conf, cats, ac, favourites=favs)
-        kw = {"embed": view.embed(), "view": view}
-        if conf.get("ephemeral") and ctx.interaction:
-            kw["ephemeral"] = True
-        if conf.get("dm_help") and ctx.guild:
+
+        original_send = commands.Context.send
+
+        cog_ref = self  # closure reference
+
+        async def patched_send(ctx_self, content=None, **kwargs):
+            """Wrapper around Context.send that converts embeds → CV2."""
             try:
-                msg = await ctx.author.send(**kw)
-                view.message = msg
-                await ctx.send("📬 Help sent to your DMs!", delete_after=5)
-            except discord.Forbidden:
-                msg = await ctx.send(**kw)
-                view.message = msg
-        else:
-            msg = await ctx.send(**kw)
+                guild = ctx_self.guild
+                if guild is None:
+                    return await original_send(ctx_self, content, **kwargs)
+
+                settings = await cog_ref.config.guild(guild).all()
+
+                if not settings["enabled"]:
+                    return await original_send(ctx_self, content, **kwargs)
+
+                if not settings["embed_override"]:
+                    return await original_send(ctx_self, content, **kwargs)
+
+                # Don't intercept if there's already a LayoutView
+                existing_view = kwargs.get("view")
+                if isinstance(existing_view, ui.LayoutView):
+                    return await original_send(ctx_self, content, **kwargs)
+
+                # Check override mode
+                mode = settings["override_mode"]
+                if mode == "help_only":
+                    return await original_send(ctx_self, content, **kwargs)
+
+                # Check per-cog override
+                cmd = ctx_self.command
+                if cmd and cmd.cog_name:
+                    cog_overrides = settings.get("cog_overrides", {})
+                    if cmd.cog_name in cog_overrides:
+                        if not cog_overrides[cmd.cog_name]:
+                            return await original_send(ctx_self, content, **kwargs)
+
+                # Check if there are embeds to convert
+                embed = kwargs.pop("embed", None)
+                embeds = kwargs.pop("embeds", None)
+
+                embed_list: List[discord.Embed] = []
+                if embed is not None:
+                    embed_list.append(embed)
+                if embeds:
+                    embed_list.extend(embeds)
+
+                if not embed_list:
+                    return await original_send(ctx_self, content, **kwargs)
+
+                # Convert embeds to LayoutView
+                accent = settings["accent_color"]
+
+                # Extract existing view items if present
+                action_rows = None
+                if existing_view and isinstance(existing_view, ui.View):
+                    action_rows = view_items_to_action_rows(existing_view)
+                    kwargs.pop("view", None)
+
+                layout = embeds_to_layout(
+                    embed_list,
+                    content=content,
+                    accent_color=accent,
+                    show_thumbnail=settings["show_thumbnail"],
+                    show_footer=settings["show_footer"],
+                    compact=settings["compact_fields"],
+                    existing_action_rows=action_rows,
+                )
+
+                # Send with LayoutView (content must be None for CV2)
+                kwargs["view"] = layout
+                kwargs.pop("embed", None)
+                kwargs.pop("embeds", None)
+                msg = await original_send(ctx_self, None, **kwargs)
+
+                # Track for cleanup
+                if msg:
+                    cog_ref._active_views[msg.id] = layout
+
+                return msg
+
+            except Exception as e:
+                log.warning(f"CV2 conversion failed, falling back to original: {e}")
+                # Restore embed/embeds if we removed them
+                return await original_send(ctx_self, content, **kwargs)
+
+        self._original_send = original_send
+        commands.Context.send = patched_send
+        self._patched = True
+        log.info("NewHelpMenu: Patched Context.send for embed → CV2 conversion")
+
+    async def _remove_patches(self):
+        """Restore original methods."""
+        if self._original_send:
+            commands.Context.send = self._original_send
+            self._original_send = None
+        self._patched = False
+        log.info("NewHelpMenu: Restored original Context.send")
+
+    # ═══════════════════════════════════════════════════════════════
+    #  HELP SYSTEM
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _send_cv2_help(
+        self,
+        ctx: commands.Context,
+        thing: Optional[str] = None,
+    ):
+        """Send Components V2 help for the bot, a cog, or a command."""
+        settings = await self.config.guild(ctx.guild).all()
+        accent = settings["accent_color"]
+        categories = settings["categories"]
+        category_emojis = settings["category_emojis"]
+        blacklisted_cogs = settings["blacklisted_cogs"]
+        blacklisted_commands = settings["blacklisted_commands"]
+        show_hidden = settings["show_hidden"]
+        timeout = settings["help_timeout"]
+
+        if thing is None:
+            # Full bot help
+            pages, select_options = await build_bot_help_pages(
+                ctx,
+                self.bot,
+                categories=categories,
+                category_emojis=category_emojis,
+                accent_color=accent,
+                show_hidden=show_hidden,
+                blacklisted_cogs=blacklisted_cogs,
+                blacklisted_commands=blacklisted_commands,
+            )
+
+            view = HelpPaginatorView(
+                pages,
+                author_id=ctx.author.id,
+                timeout=float(timeout),
+                category_options=select_options,
+            )
+
+            destination = ctx.author if settings["help_in_dm"] else ctx.channel
+            msg = await destination.send(view=view)
             view.message = msg
-        if conf.get("delete_after", 0) > 0:
-            await asyncio.sleep(conf["delete_after"])
-            try:
-                await msg.delete()
-            except Exception:
-                pass
+            self._active_views[msg.id] = view
 
-    async def _send_cmd_help(self, ctx, cmd):
-        conf = await self._conf(ctx.guild)
-        if not conf.get("enabled"):
-            if self._old_fmt:
-                return await self._old_fmt.format_command_help(ctx, cmd)
-            return
-        cats, ac = await self._cats(ctx, conf)
-        favs = (await self.config.member(ctx.author).favourites()) if ctx.guild and conf.get("allow_favourites") else []
-        hv = HelpView(self, ctx, conf, cats, ac, favourites=favs)
-        dv = _DetailView(hv, cmd)
-        kw = {"embed": hv.detail_embed(cmd), "view": dv}
-        if conf.get("ephemeral") and ctx.interaction:
-            kw["ephemeral"] = True
-        msg = await ctx.send(**kw)
-        hv.message = msg
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    #  ADMIN COMMANDS — helpmenu / hm
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    @commands.group(name="helpmenu", aliases=["hm"])
-    @commands.guild_only()
-    @checks.admin_or_permissions(manage_guild=True)
-    async def helpmenu(self, ctx):
-        """Configure the New Help Menu system."""
-
-    @helpmenu.command(name="toggle")
-    async def hm_toggle(self, ctx):
-        """Enable or disable the custom help menu."""
-        cur = await self.config.guild(ctx.guild).enabled()
-        await self.config.guild(ctx.guild).enabled.set(not cur)
-        await ctx.send(f"✅ Custom help menu **{'enabled' if not cur else 'disabled'}**.")
-
-    @helpmenu.command(name="theme")
-    async def hm_theme(self, ctx, theme: str):
-        """Set theme: `default`, `minimal`, `compact`, `dark`, `custom`."""
-        t = theme.lower()
-        if t not in ("default", "minimal", "compact", "dark", "custom"):
-            return await ctx.send("Invalid. Choose: `default`, `minimal`, `compact`, `dark`, `custom`.")
-        await self.config.guild(ctx.guild).theme.set(t)
-        await ctx.send(f"✅ Theme → **{t}**.")
-
-    @helpmenu.command(name="layout")
-    async def hm_layout(self, ctx, layout: str):
-        """Set overall layout: `default`, `compact`, `two_column`, `list`, `minimal`, `detailed`."""
-        l = layout.lower()
-        if l not in ("default", "compact", "two_column", "list", "minimal", "detailed"):
-            return await ctx.send("Invalid. Choose: `default`, `compact`, `two_column`, `list`, `minimal`, `detailed`.")
-        await self.config.guild(ctx.guild).layout.set(l)
-        # Auto-adjust category layout
-        mapping = {"two_column": "inline", "compact": "table", "minimal": "description", "detailed": "fields"}
-        if l in mapping:
-            await self.config.guild(ctx.guild).category_layout.set(mapping[l])
-            if l == "two_column":
-                await self.config.guild(ctx.guild).category_columns.set(2)
-        await ctx.send(f"✅ Layout → **{l}**.")
-
-    @helpmenu.command(name="catlayout")
-    async def hm_catlayout(self, ctx, layout: str):
-        """Set category page layout: `fields`, `description`, `inline`, `numbered`, `table`."""
-        l = layout.lower()
-        if l not in _CATEGORY_LAYOUTS:
-            return await ctx.send(f"Invalid. Choose: {humanize_list(list(_CATEGORY_LAYOUTS.keys()))}")
-        await self.config.guild(ctx.guild).category_layout.set(l)
-        await ctx.send(f"✅ Category layout → **{l}**.")
-
-    @helpmenu.command(name="homelayout")
-    async def hm_homelayout(self, ctx, layout: str):
-        """Set home page layout: `list`, `grid`, `minimal`."""
-        l = layout.lower()
-        if l not in ("list", "grid", "minimal"):
-            return await ctx.send("Invalid. Choose: `list`, `grid`, `minimal`.")
-        await self.config.guild(ctx.guild).home_layout.set(l)
-        await ctx.send(f"✅ Home layout → **{l}**.")
-
-    @helpmenu.command(name="columns")
-    async def hm_columns(self, ctx, columns: int):
-        """Set number of columns for field layout (1-3)."""
-        if columns not in (1, 2, 3):
-            return await ctx.send("Choose 1, 2, or 3.")
-        await self.config.guild(ctx.guild).category_columns.set(columns)
-        await ctx.send(f"✅ Columns → **{columns}**.")
-
-    @helpmenu.command(name="navstyle")
-    async def hm_navstyle(self, ctx, style: str):
-        """Set navigation style: `full`, `compact`, `arrows_only`, `select_only`."""
-        s = style.lower()
-        if s not in ("full", "compact", "arrows_only", "select_only"):
-            return await ctx.send("Invalid. Choose: `full`, `compact`, `arrows_only`, `select_only`.")
-        await self.config.guild(ctx.guild).nav_style.set(s)
-        await ctx.send(f"✅ Nav style → **{s}**.")
-
-    @helpmenu.command(name="colour", aliases=["color"])
-    async def hm_colour(self, ctx, colour: discord.Colour):
-        """Set the accent colour."""
-        await self.config.guild(ctx.guild).accent_colour.set(colour.value)
-        await ctx.send(f"✅ Colour → **{colour}**.")
-
-    @helpmenu.command(name="resetcolour", aliases=["resetcolor"])
-    async def hm_resetcolour(self, ctx):
-        """Reset accent colour."""
-        await self.config.guild(ctx.guild).accent_colour.set(None)
-        await ctx.send("✅ Colour reset.")
-
-    @helpmenu.command(name="thumbnail", aliases=["thumb"])
-    async def hm_thumb(self, ctx, url: Optional[str] = None):
-        """Set/reset home thumbnail."""
-        await self.config.guild(ctx.guild).thumbnail.set(url)
-        await ctx.send(f"✅ Thumbnail {'set' if url else 'reset'}.")
-
-    @helpmenu.command(name="title")
-    async def hm_title(self, ctx, *, title: str):
-        """Set title. Placeholders: `{bot_name}`, `{prefix}`."""
-        await self.config.guild(ctx.guild).title_text.set(title)
-        await ctx.send(f"✅ Title → {title}")
-
-    @helpmenu.command(name="description", aliases=["desc"])
-    async def hm_desc(self, ctx, *, text: str):
-        """Set home description."""
-        await self.config.guild(ctx.guild).description.set(text)
-        await ctx.send("✅ Description updated.")
-
-    @helpmenu.command(name="footer")
-    async def hm_footer(self, ctx, *, text: str):
-        """Set footer text."""
-        await self.config.guild(ctx.guild).footer_text.set(text)
-        await ctx.send("✅ Footer updated.")
-
-    @helpmenu.command(name="footericon")
-    async def hm_footericon(self, ctx, url: Optional[str] = None):
-        """Set footer icon URL."""
-        await self.config.guild(ctx.guild).footer_icon.set(url)
-        await ctx.send(f"✅ Footer icon {'set' if url else 'reset'}.")
-
-    @helpmenu.command(name="tagline")
-    async def hm_tagline(self, ctx, *, text: str = ""):
-        """Set/clear tagline above description."""
-        await self.config.guild(ctx.guild).tagline.set(text)
-        await ctx.send(f"✅ Tagline {'set' if text else 'cleared'}.")
-
-    @helpmenu.command(name="homeimage")
-    async def hm_homeimg(self, ctx, url: Optional[str] = None):
-        """Set/reset home image."""
-        await self.config.guild(ctx.guild).home_image.set(url)
-        await ctx.send(f"✅ Home image {'set' if url else 'reset'}.")
-
-    @helpmenu.command(name="author")
-    async def hm_author(self, ctx, toggle: str):
-        """Toggle embed author line: `on` / `off`."""
-        on = toggle.lower() in ("on", "true", "yes", "1")
-        await self.config.guild(ctx.guild).show_author.set(on)
-        await ctx.send(f"✅ Author → **{'on' if on else 'off'}**.")
-
-    @helpmenu.command(name="authorname")
-    async def hm_authname(self, ctx, *, name: str):
-        """Set author name. Placeholder: `{bot_name}`."""
-        await self.config.guild(ctx.guild).author_name.set(name)
-        await ctx.send(f"✅ Author name → {name}")
-
-    @helpmenu.command(name="authoricon")
-    async def hm_authicon(self, ctx, url: Optional[str] = None):
-        """Set author icon URL."""
-        await self.config.guild(ctx.guild).author_icon.set(url)
-        await ctx.send(f"✅ Author icon {'set' if url else 'reset'}.")
-
-    @helpmenu.command(name="separator")
-    async def hm_sep(self, ctx, *, sep: str):
-        """Set command separator for description layout. Use `\\n` for newline."""
-        sep = sep.replace("\\n", "\n")
-        await self.config.guild(ctx.guild).command_separator.set(sep)
-        await ctx.send("✅ Separator set.")
-
-    @helpmenu.command(name="searchplaceholder")
-    async def hm_sph(self, ctx, *, text: str):
-        """Set search modal placeholder text."""
-        await self.config.guild(ctx.guild).search_placeholder.set(text)
-        await ctx.send("✅ Placeholder set.")
-
-    # ── Button customisation ──
-
-    @helpmenu.group(name="button", aliases=["btn"])
-    async def hm_btn(self, ctx):
-        """Customise button labels, emojis, and styles."""
-
-    @hm_btn.command(name="style")
-    async def btn_style(self, ctx, style: str):
-        """Set category button style: primary, secondary, success, danger."""
-        s = style.lower()
-        if s not in _BSTYLE:
-            return await ctx.send(f"Invalid. Choose: {humanize_list(list(_BSTYLE.keys()))}")
-        await self.config.guild(ctx.guild).button_style.set(s)
-        await ctx.send(f"✅ Button style → **{s}**.")
-
-    @hm_btn.command(name="pagestyle")
-    async def btn_pagestyle(self, ctx, style: str):
-        """Set pagination button style."""
-        s = style.lower()
-        if s not in _BSTYLE:
-            return await ctx.send(f"Invalid. Choose: {humanize_list(list(_BSTYLE.keys()))}")
-        await self.config.guild(ctx.guild).page_button_style.set(s)
-        await ctx.send(f"✅ Page button style → **{s}**.")
-
-    @hm_btn.command(name="homelabel")
-    async def btn_hlabel(self, ctx, *, label: str):
-        """Set home button label."""
-        await self.config.guild(ctx.guild).btn_home_label.set(label)
-        await ctx.send(f"✅ Home label → {label}")
-
-    @hm_btn.command(name="homeemoji")
-    async def btn_hemoji(self, ctx, emoji: str):
-        """Set home button emoji."""
-        await self.config.guild(ctx.guild).btn_home_emoji.set(emoji)
-        await ctx.send(f"✅ Home emoji → {emoji}")
-
-    @hm_btn.command(name="prevemoji")
-    async def btn_pemoji(self, ctx, emoji: str):
-        """Set previous page button emoji."""
-        await self.config.guild(ctx.guild).btn_prev_emoji.set(emoji)
-        await ctx.send(f"✅ Prev emoji → {emoji}")
-
-    @hm_btn.command(name="nextemoji")
-    async def btn_nemoji(self, ctx, emoji: str):
-        """Set next page button emoji."""
-        await self.config.guild(ctx.guild).btn_next_emoji.set(emoji)
-        await ctx.send(f"✅ Next emoji → {emoji}")
-
-    @hm_btn.command(name="searchlabel")
-    async def btn_slabel(self, ctx, *, label: str):
-        """Set search button label."""
-        await self.config.guild(ctx.guild).btn_search_label.set(label)
-        await ctx.send(f"✅ Search label → {label}")
-
-    @hm_btn.command(name="searchemoji")
-    async def btn_semoji(self, ctx, emoji: str):
-        """Set search button emoji."""
-        await self.config.guild(ctx.guild).btn_search_emoji.set(emoji)
-        await ctx.send(f"✅ Search emoji → {emoji}")
-
-    @hm_btn.command(name="favlabel")
-    async def btn_flabel(self, ctx, *, label: str):
-        """Set favourites button label."""
-        await self.config.guild(ctx.guild).btn_fav_label.set(label)
-        await ctx.send(f"✅ Fav label → {label}")
-
-    @hm_btn.command(name="favemoji")
-    async def btn_femoji(self, ctx, emoji: str):
-        """Set favourites button emoji."""
-        await self.config.guild(ctx.guild).btn_fav_emoji.set(emoji)
-        await ctx.send(f"✅ Fav emoji → {emoji}")
-
-    @hm_btn.command(name="closeemoji")
-    async def btn_cemoji(self, ctx, emoji: str):
-        """Set close button emoji."""
-        await self.config.guild(ctx.guild).btn_close_emoji.set(emoji)
-        await ctx.send(f"✅ Close emoji → {emoji}")
-
-    # ── Toggle settings ──
-
-    @helpmenu.command(name="set")
-    async def hm_set(self, ctx, setting: str, value: str):
-        """Toggle a setting on/off, or set a number.
-
-        Toggles: `aliases`, `cooldown`, `permissions`, `signature`, `hidden`,
-        `timestamp`, `selectmenu`, `buttons`, `dmhelp`, `ephemeral`,
-        `favourites`, `search`, `sortcommands`, `sortcategories`,
-        `commandcount`, `banner`, `homebutton`, `closebutton`, `pagecounter`,
-        `detailparent`, `detailcog`, `detailfullhelp`, `reactionnav`
-
-        Numbers: `timeout`, `deleteafter`, `maxperpage`
-        """
-        toggles = {
-            "aliases": "show_aliases", "cooldown": "show_cooldown", "permissions": "show_permissions",
-            "signature": "show_signature", "hidden": "show_hidden", "timestamp": "timestamp",
-            "selectmenu": "use_select_menu", "buttons": "use_buttons", "dmhelp": "dm_help",
-            "ephemeral": "ephemeral", "favourites": "allow_favourites", "favorites": "allow_favourites",
-            "search": "search_enabled", "sortcommands": "sort_commands", "sortcategories": "sort_categories",
-            "commandcount": "show_command_count", "banner": "show_category_banner",
-            "homebutton": "show_home_button", "closebutton": "show_close_button",
-            "pagecounter": "show_page_counter", "detailparent": "detail_show_parent",
-            "detailcog": "detail_show_cog", "detailfullhelp": "detail_show_full_help",
-            "reactionnav": "reaction_nav",
-        }
-        numbers = {"timeout": "timeout", "deleteafter": "delete_after", "maxperpage": "max_commands_per_page"}
-        sl = setting.lower()
-        if sl in toggles:
-            on = value.lower() in ("on", "true", "yes", "1", "enable")
-            await self.config.guild(ctx.guild).get_attr(toggles[sl]).set(on)
-            await ctx.send(f"✅ **{setting}** → **{'on' if on else 'off'}**.")
-        elif sl in numbers:
-            try:
-                n = int(value)
-            except ValueError:
-                return await ctx.send("Provide a number.")
-            await self.config.guild(ctx.guild).get_attr(numbers[sl]).set(n)
-            await ctx.send(f"✅ **{setting}** → **{n}**.")
         else:
-            await ctx.send(f"Unknown setting. Valid: {humanize_list(list(toggles) + list(numbers))}")
+            # Try to find a command first, then a cog
+            cmd = self.bot.get_command(thing)
+            if cmd:
+                components = await build_command_help_page(
+                    ctx, cmd, accent_color=accent
+                )
+                layout = ui.LayoutView()
+                for comp in components:
+                    layout.add_item(comp)
 
-    # ━━━━━━━━━━━━━━━━━ Categories ━━━━━━━━━━━━━━━━━
+                destination = ctx.author if settings["help_in_dm"] else ctx.channel
+                msg = await destination.send(view=layout)
+                self._active_views[msg.id] = layout
+                return
 
-    @helpmenu.group(name="category", aliases=["cat"])
-    async def hm_cat(self, ctx):
-        """Manage custom categories."""
+            # Try cog
+            cog = self.bot.get_cog(thing)
+            if cog:
+                components = await build_cog_help_page(
+                    ctx, cog, accent_color=accent, show_hidden=show_hidden
+                )
+                layout = ui.LayoutView()
+                for comp in components:
+                    layout.add_item(comp)
 
-    @hm_cat.command(name="create", aliases=["add"])
-    async def cat_create(self, ctx, name: str, emoji: Optional[str] = None, *, description: str = ""):
-        """Create a custom category.
+                destination = ctx.author if settings["help_in_dm"] else ctx.channel
+                msg = await destination.send(view=layout)
+                self._active_views[msg.id] = layout
+                return
 
-        `[p]hm cat create Moderation 🛡️ All mod commands`
+            # Try category
+            for cat_name, cog_list in categories.items():
+                if cat_name.lower() == thing.lower():
+                    all_cmds: List[Tuple[str, str]] = []
+                    for cog_name in cog_list:
+                        cog = self.bot.get_cog(cog_name)
+                        if cog:
+                            for c in sorted(cog.get_commands(), key=lambda x: x.name):
+                                if c.hidden and not show_hidden:
+                                    continue
+                                try:
+                                    if not await c.can_run(ctx):
+                                        continue
+                                except Exception:
+                                    continue
+                                short = c.short_doc or "No description"
+                                all_cmds.append(
+                                    (f"{ctx.clean_prefix}{c.qualified_name}", short)
+                                )
+
+                    emoji = category_emojis.get(cat_name, "📂")
+                    from .formatter import _make_category_container
+
+                    container = _make_category_container(
+                        cat_name, all_cmds, accent_color=accent, emoji=emoji
+                    )
+                    layout = ui.LayoutView()
+                    layout.add_item(container)
+
+                    destination = ctx.author if settings["help_in_dm"] else ctx.channel
+                    msg = await destination.send(view=layout)
+                    self._active_views[msg.id] = layout
+                    return
+
+            # Nothing found
+            layout = ui.LayoutView()
+            container = ui.Container(accent_colour=discord.Colour(0xED4245))
+            container.add_item(
+                ui.TextDisplay(f"❌ No command, cog, or category named **{thing}** found.")
+            )
+            layout.add_item(container)
+            await ctx.send(view=layout)
+
+    # ═══════════════════════════════════════════════════════════════
+    #  LISTENERS
+    # ═══════════════════════════════════════════════════════════════
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        """Route button/select interactions to our active views."""
+        if interaction.type != discord.InteractionType.component:
+            return
+
+        custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
+        if not custom_id.startswith(("help_", "cv2menu_")):
+            return
+
+        msg_id = interaction.message.id if interaction.message else None
+        if msg_id and msg_id in self._active_views:
+            view = self._active_views[msg_id]
+            if hasattr(view, "handle_interaction"):
+                await view.handle_interaction(interaction)
+                return
+
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
+    # ═══════════════════════════════════════════════════════════════
+    #  HELP COMMAND OVERRIDE
+    # ═══════════════════════════════════════════════════════════════
+
+    @commands.command(name="help", hidden=True)
+    async def _help_override(self, ctx: commands.Context, *, thing: str = None):
+        """Shows help for the bot, a command, a cog, or a category.
+
+        This overrides the default help when Components V2 is enabled.
         """
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name in cs:
-                return await ctx.send(f"`{name}` already exists.")
-            cs[name] = {"label": name, "emoji": emoji, "description": description,
-                        "colour": None, "thumbnail": None, "image": None, "cogs": [],
-                        "order": len(cs), "hidden": False, "required_role": None}
-        await ctx.send(f"✅ Category **{name}** created.")
+        if ctx.guild:
+            settings = await self.config.guild(ctx.guild).all()
+            if settings["enabled"] and settings["help_override"]:
+                await self._send_cv2_help(ctx, thing)
+                return
 
-    @hm_cat.command(name="delete", aliases=["remove", "rm"])
-    async def cat_delete(self, ctx, name: str):
-        """Delete a category."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            del cs[name]
-        await ctx.send(f"✅ **{name}** deleted.")
+        # Fall back to default
+        await ctx.send_help(thing)
 
-    @hm_cat.command(name="rename")
-    async def cat_rename(self, ctx, old: str, *, new: str):
-        """Rename a category."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if old not in cs:
-                return await ctx.send("Not found.")
-            d = cs.pop(old)
-            d["label"] = new
-            cs[new] = d
-        await ctx.send(f"✅ **{old}** → **{new}**.")
+    # ═══════════════════════════════════════════════════════════════
+    #  SETTINGS COMMANDS
+    # ═══════════════════════════════════════════════════════════════
 
-    @hm_cat.command(name="label")
-    async def cat_label(self, ctx, name: str, *, label: str):
-        """Set the display label (can differ from the internal name)."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["label"] = label
-        await ctx.send(f"✅ Label for **{name}** → {label}")
+    @commands.group(name="cv2", invoke_without_command=True)
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2(self, ctx: commands.Context):
+        """Components V2 settings and controls."""
+        await ctx.send_help(ctx.command)
 
-    @hm_cat.command(name="emoji")
-    async def cat_emoji(self, ctx, name: str, emoji: Optional[str] = None):
-        """Set/clear category emoji."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["emoji"] = emoji
-        await ctx.send(f"✅ Emoji {'set' if emoji else 'cleared'}.")
+    @cv2.command(name="toggle")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_toggle(self, ctx: commands.Context):
+        """Toggle Components V2 on/off for this server."""
+        current = await self.config.guild(ctx.guild).enabled()
+        new_val = not current
+        await self.config.guild(ctx.guild).enabled.set(new_val)
 
-    @hm_cat.command(name="description", aliases=["desc"])
-    async def cat_desc(self, ctx, name: str, *, description: str = ""):
-        """Set category description."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["description"] = description
-        await ctx.send("✅ Description updated.")
+        status = "✅ **Enabled**" if new_val else "❌ **Disabled**"
 
-    @hm_cat.command(name="colour", aliases=["color"])
-    async def cat_colour(self, ctx, name: str, colour: discord.Colour):
-        """Set category embed colour."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["colour"] = colour.value
-        await ctx.send(f"✅ Colour set for **{name}**.")
+        if new_val:
+            layout = ui.LayoutView()
+            container = ui.Container(
+                accent_colour=discord.Colour(
+                    await self.config.guild(ctx.guild).accent_color()
+                )
+            )
+            container.add_item(
+                ui.TextDisplay(f"## Components V2 {status}")
+            )
+            container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+            container.add_item(
+                ui.TextDisplay(
+                    "All bot embeds, help menus, and paginated menus will now use "
+                    "Discord's new Components V2 layout system.\n\n"
+                    f"Use `{ctx.clean_prefix}cv2 settings` to see all options.\n"
+                    f"Use `{ctx.clean_prefix}cv2 help toggle` to toggle help override.\n"
+                    f"Use `{ctx.clean_prefix}cv2 embeds toggle` to toggle embed conversion."
+                )
+            )
+            layout.add_item(container)
+            await ctx.send(view=layout)
+        else:
+            await ctx.send(f"Components V2 {status} — reverted to standard embeds.")
 
-    @hm_cat.command(name="thumbnail")
-    async def cat_thumb(self, ctx, name: str, url: Optional[str] = None):
-        """Set/reset category thumbnail."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["thumbnail"] = url
-        await ctx.send(f"✅ Thumbnail {'set' if url else 'reset'}.")
+    @cv2.group(name="help", invoke_without_command=True)
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_help(self, ctx: commands.Context):
+        """Help menu override settings."""
+        enabled = await self.config.guild(ctx.guild).help_override()
+        status = "✅ Enabled" if enabled else "❌ Disabled"
+        await ctx.send(f"Help menu override: {status}")
 
-    @hm_cat.command(name="image")
-    async def cat_img(self, ctx, name: str, url: Optional[str] = None):
-        """Set/reset category large image."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["image"] = url
-        await ctx.send(f"✅ Image {'set' if url else 'reset'}.")
+    @cv2_help.command(name="toggle")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_help_toggle(self, ctx: commands.Context):
+        """Toggle the Components V2 help menu."""
+        current = await self.config.guild(ctx.guild).help_override()
+        new_val = not current
+        await self.config.guild(ctx.guild).help_override.set(new_val)
+        status = "✅ Enabled" if new_val else "❌ Disabled"
+        await ctx.send(f"Help menu override: {status}")
 
-    @hm_cat.command(name="order")
-    async def cat_order(self, ctx, name: str, order: int):
-        """Set display order (lower = first)."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["order"] = order
-        await ctx.send(f"✅ Order → **{order}**.")
+    @cv2_help.command(name="dm")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_help_dm(self, ctx: commands.Context):
+        """Toggle whether help is sent via DM."""
+        current = await self.config.guild(ctx.guild).help_in_dm()
+        new_val = not current
+        await self.config.guild(ctx.guild).help_in_dm.set(new_val)
+        where = "DMs" if new_val else "the channel"
+        await ctx.send(f"Help will now be sent to {where}.")
 
-    @hm_cat.command(name="hide")
-    async def cat_hide(self, ctx, name: str):
-        """Hide a category."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["hidden"] = True
-        await ctx.send(f"✅ **{name}** hidden.")
+    @cv2_help.command(name="timeout")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_help_timeout(self, ctx: commands.Context, seconds: int):
+        """Set the help menu timeout in seconds (30-600)."""
+        seconds = max(30, min(600, seconds))
+        await self.config.guild(ctx.guild).help_timeout.set(seconds)
+        await ctx.send(f"Help menu timeout set to **{seconds}s**.")
 
-    @hm_cat.command(name="unhide", aliases=["show"])
-    async def cat_unhide(self, ctx, name: str):
-        """Unhide a category."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["hidden"] = False
-        await ctx.send(f"✅ **{name}** visible.")
+    @cv2_help.command(name="hidden")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_help_hidden(self, ctx: commands.Context):
+        """Toggle showing hidden commands in help."""
+        current = await self.config.guild(ctx.guild).show_hidden()
+        new_val = not current
+        await self.config.guild(ctx.guild).show_hidden.set(new_val)
+        status = "shown" if new_val else "hidden"
+        await ctx.send(f"Hidden commands are now **{status}** in help.")
 
-    @hm_cat.command(name="requirerole", aliases=["role"])
-    async def cat_role(self, ctx, name: str, role: Optional[discord.Role] = None):
-        """Require a role to see this category."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            cs[name]["required_role"] = role.id if role else None
-        await ctx.send(f"✅ Role requirement {'set' if role else 'cleared'}.")
+    @cv2.group(name="embeds", invoke_without_command=True)
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_embeds(self, ctx: commands.Context):
+        """Embed conversion settings."""
+        enabled = await self.config.guild(ctx.guild).embed_override()
+        status = "✅ Enabled" if enabled else "❌ Disabled"
+        await ctx.send(f"Embed → Components V2 conversion: {status}")
 
-    @hm_cat.command(name="addcog")
-    async def cat_addcog(self, ctx, name: str, *, cog_name: str):
-        """Add a cog to a category."""
-        if cog_name not in self.bot.cogs:
-            return await ctx.send(f"Cog `{cog_name}` not found (case-sensitive).")
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            if cog_name not in cs[name]["cogs"]:
-                cs[name]["cogs"].append(cog_name)
-        await ctx.send(f"✅ **{cog_name}** → **{name}**.")
+    @cv2_embeds.command(name="toggle")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_embeds_toggle(self, ctx: commands.Context):
+        """Toggle automatic embed → Components V2 conversion."""
+        current = await self.config.guild(ctx.guild).embed_override()
+        new_val = not current
+        await self.config.guild(ctx.guild).embed_override.set(new_val)
+        status = "✅ Enabled" if new_val else "❌ Disabled"
+        await ctx.send(f"Embed → Components V2 conversion: {status}")
 
-    @hm_cat.command(name="removecog", aliases=["rmcog"])
-    async def cat_rmcog(self, ctx, name: str, *, cog_name: str):
-        """Remove a cog from a category."""
-        async with self.config.guild(ctx.guild).categories() as cs:
-            if name not in cs:
-                return await ctx.send("Not found.")
-            if cog_name in cs[name]["cogs"]:
-                cs[name]["cogs"].remove(cog_name)
-        await ctx.send(f"✅ Removed.")
+    @cv2_embeds.command(name="mode")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_embeds_mode(self, ctx: commands.Context, mode: str):
+        """Set override mode: `all`, `help_only`, or `commands_only`.
 
-    @hm_cat.command(name="list")
-    async def cat_list(self, ctx):
-        """List all custom categories."""
-        cs = await self.config.guild(ctx.guild).categories()
-        if not cs:
-            return await ctx.send("No custom categories. Cogs auto-group into their own categories.")
+        - **all** — Convert all bot embeds everywhere
+        - **help_only** — Only convert the help menu
+        - **commands_only** — Only convert command responses
+        """
+        mode = mode.lower()
+        if mode not in ("all", "help_only", "commands_only"):
+            await ctx.send("Invalid mode. Choose: `all`, `help_only`, or `commands_only`.")
+            return
+        await self.config.guild(ctx.guild).override_mode.set(mode)
+        await ctx.send(f"Override mode set to **{mode}**.")
+
+    @cv2_embeds.command(name="cog")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_embeds_cog(self, ctx: commands.Context, cog_name: str, enable: bool):
+        """Override embed conversion for a specific cog.
+
+        Example: `[p]cv2 embeds cog Moderation false` — disable CV2 for Moderation.
+        """
+        async with self.config.guild(ctx.guild).cog_overrides() as overrides:
+            overrides[cog_name] = enable
+        status = "enabled" if enable else "disabled"
+        await ctx.send(f"Embed conversion for **{cog_name}**: {status}")
+
+    @cv2.group(name="menus", invoke_without_command=True)
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_menus(self, ctx: commands.Context):
+        """Menu/pagination override settings."""
+        enabled = await self.config.guild(ctx.guild).menu_override()
+        status = "✅ Enabled" if enabled else "❌ Disabled"
+        await ctx.send(f"Menu → Components V2 override: {status}")
+
+    @cv2_menus.command(name="toggle")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_menus_toggle(self, ctx: commands.Context):
+        """Toggle Components V2 menu pagination."""
+        current = await self.config.guild(ctx.guild).menu_override()
+        new_val = not current
+        await self.config.guild(ctx.guild).menu_override.set(new_val)
+        status = "✅ Enabled" if new_val else "❌ Disabled"
+        await ctx.send(f"Menu → Components V2 override: {status}")
+
+    # ── Appearance ──
+
+    @cv2.command(name="color", aliases=["colour"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_color(self, ctx: commands.Context, hex_color: str):
+        """Set the global accent colour (hex).
+
+        Example: `[p]cv2 color #FF5733` or `[p]cv2 color 5865F2`
+        """
+        hex_color = hex_color.strip("#")
+        try:
+            color_int = int(hex_color, 16)
+            if color_int < 0 or color_int > 0xFFFFFF:
+                raise ValueError
+        except ValueError:
+            await ctx.send("Invalid hex colour. Use format: `#5865F2` or `5865F2`.")
+            return
+
+        await self.config.guild(ctx.guild).accent_color.set(color_int)
+
+        if await self.config.guild(ctx.guild).enabled():
+            layout = ui.LayoutView()
+            container = ui.Container(accent_colour=discord.Colour(color_int))
+            container.add_item(
+                ui.TextDisplay(f"### ✅ Accent colour updated to `#{hex_color.upper()}`")
+            )
+            container.add_item(
+                ui.TextDisplay("This is how your containers will look.")
+            )
+            layout.add_item(container)
+            await ctx.send(view=layout)
+        else:
+            await ctx.send(f"Accent colour set to `#{hex_color.upper()}`.")
+
+    @cv2.command(name="thumbnail")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_thumbnail(self, ctx: commands.Context, *, url: str = ""):
+        """Set a custom bot thumbnail URL for help pages.
+
+        Leave empty to use the bot's avatar. Use `off` to disable.
+        """
+        if url.lower() == "off":
+            await self.config.guild(ctx.guild).show_thumbnail.set(False)
+            await ctx.send("Thumbnails disabled.")
+        elif url:
+            await self.config.guild(ctx.guild).bot_thumbnail_url.set(url)
+            await self.config.guild(ctx.guild).show_thumbnail.set(True)
+            await ctx.send(f"Custom thumbnail set: {url}")
+        else:
+            await self.config.guild(ctx.guild).bot_thumbnail_url.set("")
+            await self.config.guild(ctx.guild).show_thumbnail.set(True)
+            await ctx.send("Thumbnail reset to bot avatar.")
+
+    @cv2.command(name="compact")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_compact(self, ctx: commands.Context):
+        """Toggle compact field rendering."""
+        current = await self.config.guild(ctx.guild).compact_fields()
+        new_val = not current
+        await self.config.guild(ctx.guild).compact_fields.set(new_val)
+        mode = "compact" if new_val else "expanded"
+        await ctx.send(f"Field rendering mode: **{mode}**.")
+
+    @cv2.command(name="footer")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_footer(self, ctx: commands.Context):
+        """Toggle footer display on converted embeds."""
+        current = await self.config.guild(ctx.guild).show_footer()
+        new_val = not current
+        await self.config.guild(ctx.guild).show_footer.set(new_val)
+        status = "shown" if new_val else "hidden"
+        await ctx.send(f"Footers: **{status}**.")
+
+    # ── Categories ──
+
+    @cv2.group(name="category", invoke_without_command=True)
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_category(self, ctx: commands.Context):
+        """Manage custom help categories."""
+        categories = await self.config.guild(ctx.guild).categories()
+        emojis = await self.config.guild(ctx.guild).category_emojis()
+
+        if not categories:
+            await ctx.send(
+                f"No custom categories set. Cogs will be listed individually.\n"
+                f"Use `{ctx.clean_prefix}cv2 category add <name> <cog1> [cog2]...` to create one."
+            )
+            return
+
         lines = []
-        for n, d in sorted(cs.items(), key=lambda kv: kv[1].get("order", 999)):
-            e = d.get("emoji", "📁")
-            cogs = d.get("cogs", [])
-            h = " (hidden)" if d.get("hidden") else ""
-            r = ""
-            if d.get("required_role"):
-                ro = ctx.guild.get_role(d["required_role"])
-                r = f" [role: {ro.name if ro else 'deleted'}]"
-            lines.append(f"{e} **{d.get('label', n)}** — order: {d.get('order', 0)}, cogs: {humanize_list(cogs) or 'none'}{h}{r}")
+        for cat, cogs in categories.items():
+            emoji = emojis.get(cat, "📂")
+            cog_list = ", ".join(cogs)
+            lines.append(f"{emoji} **{cat}** → {cog_list}")
+
         await ctx.send("\n".join(lines))
 
-    # ━━━━━━━━━━━━━━━━━ Blacklists ━━━━━━━━━━━━━━━━━
+    @cv2_category.command(name="add")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_category_add(self, ctx: commands.Context, name: str, *cogs: str):
+        """Create or update a custom category.
 
-    @helpmenu.group(name="hide")
-    async def hm_hide(self, ctx):
-        """Hide cogs or commands."""
+        Example: `[p]cv2 category add Moderation Mod Warnings AutoMod`
+        """
+        if not cogs:
+            await ctx.send("Provide at least one cog name.")
+            return
 
-    @hm_hide.command(name="cog")
-    async def hide_cog(self, ctx, *, cog_name: str):
-        """Hide a cog entirely."""
-        async with self.config.guild(ctx.guild).hidden_cogs() as h:
-            if cog_name not in h:
-                h.append(cog_name)
-        await ctx.send(f"✅ **{cog_name}** hidden.")
+        async with self.config.guild(ctx.guild).categories() as categories:
+            categories[name] = list(cogs)
 
-    @hm_hide.command(name="command", aliases=["cmd"])
-    async def hide_cmd(self, ctx, *, command_name: str):
-        """Hide a specific command."""
-        async with self.config.guild(ctx.guild).hidden_commands() as h:
-            if command_name not in h:
-                h.append(command_name)
-        await ctx.send(f"✅ `{command_name}` hidden.")
+        await ctx.send(
+            f"Category **{name}** set with cogs: {humanize_list(list(cogs))}\n"
+            f"Set an emoji: `{ctx.clean_prefix}cv2 category emoji {name} 🛡️`"
+        )
 
-    @helpmenu.group(name="unhide")
-    async def hm_unhide(self, ctx):
-        """Unhide cogs or commands."""
-
-    @hm_unhide.command(name="cog")
-    async def unhide_cog(self, ctx, *, cog_name: str):
-        """Unhide a cog."""
-        async with self.config.guild(ctx.guild).hidden_cogs() as h:
-            if cog_name in h:
-                h.remove(cog_name)
-        await ctx.send(f"✅ **{cog_name}** visible.")
-
-    @hm_unhide.command(name="command", aliases=["cmd"])
-    async def unhide_cmd(self, ctx, *, command_name: str):
-        """Unhide a command."""
-        async with self.config.guild(ctx.guild).hidden_commands() as h:
-            if command_name in h:
-                h.remove(command_name)
-        await ctx.send(f"✅ `{command_name}` visible.")
-
-    @hm_hide.command(name="list")
-    async def hide_list(self, ctx):
-        """List all hidden items."""
-        hc = await self.config.guild(ctx.guild).hidden_cogs()
-        hcm = await self.config.guild(ctx.guild).hidden_commands()
-        parts = []
-        if hc:
-            parts.append(f"**Hidden Cogs:** {humanize_list(hc)}")
-        if hcm:
-            parts.append(f"**Hidden Commands:** {humanize_list([f'`{c}`' for c in hcm])}")
-        await ctx.send("\n".join(parts) or "Nothing hidden.")
-
-    # ━━━━━━━━━━━━━━━━━ Quick Links ━━━━━━━━━━━━━━━━━
-
-    @helpmenu.group(name="quicklink", aliases=["ql"])
-    async def hm_ql(self, ctx):
-        """Manage quick-link buttons."""
-
-    @hm_ql.command(name="add")
-    async def ql_add(self, ctx, label: str, url: str, emoji: Optional[str] = None):
-        """Add a quick link. Max 5."""
-        async with self.config.guild(ctx.guild).quick_links() as ql:
-            if len(ql) >= 5:
-                return await ctx.send("Max 5 links.")
-            ql.append({"label": label, "url": url, "emoji": emoji})
-        await ctx.send(f"✅ **{label}** added.")
-
-    @hm_ql.command(name="remove", aliases=["rm"])
-    async def ql_rm(self, ctx, label: str):
-        """Remove a quick link."""
-        async with self.config.guild(ctx.guild).quick_links() as ql:
-            ql[:] = [q for q in ql if q.get("label") != label]
-        await ctx.send(f"✅ **{label}** removed.")
-
-    @hm_ql.command(name="list")
-    async def ql_list(self, ctx):
-        """List quick links."""
-        ql = await self.config.guild(ctx.guild).quick_links()
-        if not ql:
-            return await ctx.send("None.")
-        await ctx.send("\n".join(f"{q.get('emoji', '🔗')} **{q['label']}** — {q['url']}" for q in ql))
-
-    # ━━━━━━━━━━━━━━━━━ Home Fields ━━━━━━━━━━━━━━━━━
-
-    @helpmenu.group(name="field")
-    async def hm_field(self, ctx):
-        """Manage home page fields."""
-
-    @hm_field.command(name="add")
-    async def field_add(self, ctx, name: str, *, value: str):
-        """Add a field. Append `--inline` for inline."""
-        inline = False
-        if value.endswith("--inline"):
-            value = value[:-8].strip()
-            inline = True
-        async with self.config.guild(ctx.guild).home_fields() as fs:
-            fs.append({"name": name, "value": value, "inline": inline})
-        await ctx.send(f"✅ Field **{name}** added.")
-
-    @hm_field.command(name="remove", aliases=["rm"])
-    async def field_rm(self, ctx, name: str):
-        """Remove a field."""
-        async with self.config.guild(ctx.guild).home_fields() as fs:
-            fs[:] = [f for f in fs if f.get("name") != name]
-        await ctx.send(f"✅ Removed.")
-
-    @hm_field.command(name="clear")
-    async def field_clear(self, ctx):
-        """Clear all fields."""
-        await self.config.guild(ctx.guild).home_fields.set([])
-        await ctx.send("✅ Cleared.")
-
-    @hm_field.command(name="list")
-    async def field_list(self, ctx):
-        """List fields."""
-        fs = await self.config.guild(ctx.guild).home_fields()
-        if not fs:
-            return await ctx.send("None.")
-        await ctx.send("\n".join(f"**{f['name']}** — {_trunc(f['value'], 60)} {'(inline)' if f.get('inline') else ''}" for f in fs))
-
-    # ━━━━━━━━━━━━━━━━━ Uncategorised ━━━━━━━━━━━━━━━━━
-
-    @helpmenu.command(name="uncatlabel")
-    async def hm_uncl(self, ctx, *, label: str):
-        """Set uncategorised label."""
-        await self.config.guild(ctx.guild).uncategorised_label.set(label)
-        await ctx.send(f"✅ Label → {label}")
-
-    @helpmenu.command(name="uncatdesc")
-    async def hm_uncd(self, ctx, *, desc: str = ""):
-        """Set uncategorised description."""
-        await self.config.guild(ctx.guild).uncategorised_description.set(desc)
-        await ctx.send("✅ Updated.")
-
-    @helpmenu.command(name="uncatemoji")
-    async def hm_unce(self, ctx, emoji: str):
-        """Set uncategorised emoji."""
-        await self.config.guild(ctx.guild).uncategorised_emoji.set(emoji)
-        await ctx.send(f"✅ Emoji → {emoji}")
-
-    @helpmenu.command(name="hideuncat")
-    async def hm_huc(self, ctx):
-        """Toggle hiding uncategorised section."""
-        cur = await self.config.guild(ctx.guild).hide_uncategorised()
-        await self.config.guild(ctx.guild).hide_uncategorised.set(not cur)
-        await ctx.send(f"✅ Uncategorised **{'hidden' if not cur else 'visible'}**.")
-
-    # ━━━━━━━━━━━━━━━━━ Preview / Settings / Reset ━━━━━━━━━━━━━━━━━
-
-    @helpmenu.command(name="preview")
-    async def hm_preview(self, ctx):
-        """Preview the help menu."""
-        await self._send_help(ctx)
-
-    @helpmenu.command(name="settings")
-    async def hm_settings(self, ctx):
-        """Show current settings."""
-        conf = await self._conf(ctx.guild)
-        skip = {"categories", "home_fields", "quick_links"}
-        lines = [f"**{k}:** `{v}`" for k, v in sorted(conf.items()) if k not in skip]
-        lines.append(f"\n**Categories:** {len(conf.get('categories', {}))}")
-        lines.append(f"**Home Fields:** {len(conf.get('home_fields', []))}")
-        lines.append(f"**Quick Links:** {len(conf.get('quick_links', []))}")
-        for p in pagify("\n".join(lines), page_length=1900):
-            await ctx.send(p)
-
-    @helpmenu.command(name="reset")
-    async def hm_reset(self, ctx):
-        """Reset all settings to defaults."""
-        await self.config.guild(ctx.guild).clear()
-        await ctx.send("✅ All settings reset.")
-
-    @helpmenu.command(name="export")
-    async def hm_export(self, ctx):
-        """Export current config as a code block (for backup/sharing)."""
-        import json
-        conf = await self._conf(ctx.guild)
-        text = json.dumps(conf, indent=2, default=str)
-        for p in pagify(text, page_length=1900):
-            await ctx.send(f"```json\n{p}\n```")
-
-    # ━━━━━━━━━━━━━━━━━ User Favourites ━━━━━━━━━━━━━━━━━
-
-    @commands.command(name="favourite", aliases=["fav", "favorite"])
-    @commands.guild_only()
-    async def user_fav(self, ctx, *, command_name: str):
-        """Toggle a command in your favourites."""
-        cmd = self.bot.get_command(command_name)
-        if not cmd:
-            return await ctx.send(f"`{command_name}` not found.")
-        qn = cmd.qualified_name
-        async with self.config.member(ctx.author).favourites() as fv:
-            if qn in fv:
-                fv.remove(qn)
-                await ctx.send(f"⭐ **{qn}** removed from favourites.")
+    @cv2_category.command(name="remove", aliases=["delete"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_category_remove(self, ctx: commands.Context, name: str):
+        """Remove a custom category."""
+        async with self.config.guild(ctx.guild).categories() as categories:
+            if name in categories:
+                del categories[name]
+                async with self.config.guild(ctx.guild).category_emojis() as emojis:
+                    emojis.pop(name, None)
+                await ctx.send(f"Category **{name}** removed.")
             else:
-                fv.append(qn)
-                await ctx.send(f"⭐ **{qn}** added to favourites!")
+                await ctx.send(f"Category **{name}** not found.")
 
-    @commands.command(name="favourites", aliases=["favs", "favorites"])
-    @commands.guild_only()
-    async def user_favs(self, ctx):
-        """View your favourites."""
-        fv = await self.config.member(ctx.author).favourites()
-        if not fv:
-            return await ctx.send("No favourites yet. Use `[p]fav <command>` to add one!")
-        lines = []
-        for qn in fv:
-            cmd = self.bot.get_command(qn)
-            lines.append(f"⭐ `{qn}` — {cmd.short_doc if cmd else '*not found*'}")
-        await ctx.send("\n".join(lines))
+    @cv2_category.command(name="emoji")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_category_emoji(self, ctx: commands.Context, name: str, emoji: str):
+        """Set the emoji for a category.
+
+        Example: `[p]cv2 category emoji Moderation 🛡️`
+        """
+        categories = await self.config.guild(ctx.guild).categories()
+        if name not in categories:
+            await ctx.send(f"Category **{name}** doesn't exist. Create it first.")
+            return
+
+        async with self.config.guild(ctx.guild).category_emojis() as emojis:
+            emojis[name] = emoji
+
+        await ctx.send(f"Emoji for **{name}** set to {emoji}")
+
+    # ── Blacklist ──
+
+    @cv2.group(name="blacklist", invoke_without_command=True)
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_blacklist(self, ctx: commands.Context):
+        """Manage blacklisted cogs/commands from help."""
+        bl_cogs = await self.config.guild(ctx.guild).blacklisted_cogs()
+        bl_cmds = await self.config.guild(ctx.guild).blacklisted_commands()
+
+        parts = []
+        if bl_cogs:
+            parts.append(f"**Blacklisted cogs:** {humanize_list(bl_cogs)}")
+        if bl_cmds:
+            parts.append(f"**Blacklisted commands:** {humanize_list(bl_cmds)}")
+        if not parts:
+            parts.append("No blacklisted cogs or commands.")
+
+        await ctx.send("\n".join(parts))
+
+    @cv2_blacklist.command(name="cog")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_blacklist_cog(self, ctx: commands.Context, *, cog_name: str):
+        """Add/remove a cog from the help blacklist."""
+        async with self.config.guild(ctx.guild).blacklisted_cogs() as bl:
+            if cog_name in bl:
+                bl.remove(cog_name)
+                await ctx.send(f"**{cog_name}** removed from help blacklist.")
+            else:
+                bl.append(cog_name)
+                await ctx.send(f"**{cog_name}** added to help blacklist.")
+
+    @cv2_blacklist.command(name="command")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_blacklist_command(self, ctx: commands.Context, *, command_name: str):
+        """Add/remove a command from the help blacklist."""
+        async with self.config.guild(ctx.guild).blacklisted_commands() as bl:
+            if command_name in bl:
+                bl.remove(command_name)
+                await ctx.send(f"`{command_name}` removed from help blacklist.")
+            else:
+                bl.append(command_name)
+                await ctx.send(f"`{command_name}` added to help blacklist.")
+
+    # ── Settings overview ──
+
+    @cv2.command(name="settings", aliases=["config", "status"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_settings(self, ctx: commands.Context):
+        """View all current Components V2 settings."""
+        s = await self.config.guild(ctx.guild).all()
+        prefix = ctx.clean_prefix
+
+        enabled_emoji = "✅" if s["enabled"] else "❌"
+        help_emoji = "✅" if s["help_override"] else "❌"
+        embed_emoji = "✅" if s["embed_override"] else "❌"
+        menu_emoji = "✅" if s["menu_override"] else "❌"
+        thumb_emoji = "✅" if s["show_thumbnail"] else "❌"
+        footer_emoji = "✅" if s["show_footer"] else "❌"
+        compact_emoji = "✅" if s["compact_fields"] else "❌"
+        hidden_emoji = "✅" if s["show_hidden"] else "❌"
+        dm_emoji = "📬" if s["help_in_dm"] else "💬"
+
+        color_hex = f"#{s['accent_color']:06X}"
+        cat_count = len(s["categories"])
+        bl_cogs = len(s["blacklisted_cogs"])
+        bl_cmds = len(s["blacklisted_commands"])
+        cog_ov = len(s.get("cog_overrides", {}))
+
+        if s["enabled"]:
+            layout = ui.LayoutView()
+            container = ui.Container(accent_colour=discord.Colour(s["accent_color"]))
+
+            container.add_item(ui.TextDisplay("## ⚙️ Components V2 Settings"))
+            container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+            status_text = (
+                f"{enabled_emoji} **Master Toggle:** {'On' if s['enabled'] else 'Off'}\n"
+                f"{help_emoji} **Help Override:** {'On' if s['help_override'] else 'Off'}\n"
+                f"{embed_emoji} **Embed Conversion:** {'On' if s['embed_override'] else 'Off'}\n"
+                f"{menu_emoji} **Menu Override:** {'On' if s['menu_override'] else 'Off'}\n"
+                f"🔧 **Override Mode:** `{s['override_mode']}`"
+            )
+            container.add_item(ui.TextDisplay(status_text))
+
+            container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+            appearance_text = (
+                f"🎨 **Accent Colour:** `{color_hex}`\n"
+                f"{thumb_emoji} **Thumbnails:** {'On' if s['show_thumbnail'] else 'Off'}\n"
+                f"{footer_emoji} **Footers:** {'On' if s['show_footer'] else 'Off'}\n"
+                f"{compact_emoji} **Compact Fields:** {'On' if s['compact_fields'] else 'Off'}\n"
+                f"{dm_emoji} **Help Destination:** {'DMs' if s['help_in_dm'] else 'Channel'}\n"
+                f"⏱️ **Help Timeout:** {s['help_timeout']}s\n"
+                f"{hidden_emoji} **Show Hidden:** {'Yes' if s['show_hidden'] else 'No'}"
+            )
+            container.add_item(ui.TextDisplay(appearance_text))
+
+            container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+            meta_text = (
+                f"📂 **Categories:** {cat_count}\n"
+                f"🚫 **Blacklisted Cogs:** {bl_cogs}\n"
+                f"🚫 **Blacklisted Commands:** {bl_cmds}\n"
+                f"🔀 **Per-Cog Overrides:** {cog_ov}"
+            )
+            container.add_item(ui.TextDisplay(meta_text))
+
+            layout.add_item(container)
+            await ctx.send(view=layout)
+        else:
+            embed = discord.Embed(
+                title="⚙️ Components V2 Settings",
+                colour=discord.Colour(s["accent_color"]),
+            )
+            embed.add_field(
+                name="Toggles",
+                value=(
+                    f"{enabled_emoji} Master: Off\n"
+                    f"{help_emoji} Help: {'On' if s['help_override'] else 'Off'}\n"
+                    f"{embed_emoji} Embeds: {'On' if s['embed_override'] else 'Off'}\n"
+                    f"{menu_emoji} Menus: {'On' if s['menu_override'] else 'Off'}"
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="Appearance",
+                value=(
+                    f"🎨 Colour: `{color_hex}`\n"
+                    f"Mode: `{s['override_mode']}`\n"
+                    f"Timeout: {s['help_timeout']}s"
+                ),
+                inline=True,
+            )
+            embed.set_footer(
+                text=f"Enable with {prefix}cv2 toggle"
+            )
+            await ctx.send(embed=embed)
+
+    @cv2.command(name="preview")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_preview(self, ctx: commands.Context):
+        """Preview what Components V2 looks like with current settings."""
+        s = await self.config.guild(ctx.guild).all()
+        accent = s["accent_color"]
+        bot_user = self.bot.user
+        bot_name = bot_user.display_name if bot_user else "Bot"
+        avatar_url = bot_user.display_avatar.url if bot_user else None
+
+        layout = ui.LayoutView()
+
+        header_container = ui.Container(accent_colour=discord.Colour(accent))
+
+        if s["show_thumbnail"] and avatar_url:
+            section = ui.Section(accessory=ui.Thumbnail(avatar_url))
+            section.add_item(ui.TextDisplay(f"## {bot_name} — Preview"))
+            section.add_item(
+                ui.TextDisplay("This is what your help and embeds will look like.")
+            )
+            header_container.add_item(section)
+        else:
+            header_container.add_item(
+                ui.TextDisplay(f"## {bot_name} — Preview\nThis is what your help and embeds will look like.")
+            )
+
+        header_container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+        header_container.add_item(
+            ui.TextDisplay(
+                "**Field 1** — Inline\n"
+                "Some value here"
+            )
+        )
+        header_container.add_item(
+            ui.TextDisplay(
+                "**Field 2** — Inline\n"
+                "Another value"
+            )
+        )
+
+        if s["show_footer"]:
+            header_container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+            header_container.add_item(ui.TextDisplay("-# Footer text · Just now"))
+
+        layout.add_item(header_container)
+
+        layout.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
+        nav_row = ui.ActionRow()
+        nav_row.add_item(ui.Button(emoji="◀️", style=discord.ButtonStyle.primary, custom_id="preview_prev", disabled=True))
+        nav_row.add_item(ui.Button(label="1/3", style=discord.ButtonStyle.secondary, custom_id="preview_ind", disabled=True))
+        nav_row.add_item(ui.Button(emoji="▶️", style=discord.ButtonStyle.primary, custom_id="preview_next", disabled=True))
+        nav_row.add_item(ui.Button(label="Close", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="preview_close", disabled=True))
+        layout.add_item(nav_row)
+
+        await ctx.send(view=layout)
+
+    @cv2.command(name="reset")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def cv2_reset(self, ctx: commands.Context):
+        """Reset all Components V2 settings to defaults."""
+        await self.config.guild(ctx.guild).clear()
+        await ctx.send("✅ All Components V2 settings reset to defaults (disabled).")
+
+    @cv2.command(name="version")
+    async def cv2_version(self, ctx: commands.Context):
+        """Show the cog version."""
+        await ctx.send(f"**NewHelpMenu** v{self.__version__} by {self.__author__}")
+
+    # ═══════════════════════════════════════════════════════════════
+    #  PUBLIC API — Other cogs can use these
+    # ═══════════════════════════════════════════════════════════════
+
+    async def is_enabled(self, guild: Optional[discord.Guild]) -> bool:
+        """Check if CV2 is enabled for a guild."""
+        if guild is None:
+            return False
+        return await self.config.guild(guild).enabled()
+
+    async def get_accent_color(self, guild: discord.Guild) -> int:
+        """Get the accent colour for a guild."""
+        return await self.config.guild(guild).accent_color()
+
+    async def send_cv2_menu(
+        self,
+        ctx: commands.Context,
+        pages: List[Any],
+        *,
+        timeout: float = 120.0,
+    ) -> Optional[discord.Message]:
+        """Send a CV2 paginated menu. Use this from other cogs!
+
+        Parameters
+        ----------
+        ctx: The command context.
+        pages: List of embeds, strings, or containers.
+        timeout: Menu timeout in seconds.
+
+        Returns
+        -------
+        The sent message, or None.
+        """
+        if not ctx.guild:
+            return None
+
+        accent = await self.config.guild(ctx.guild).accent_color()
+        view = CV2MenuPaginator(
+            pages,
+            author_id=ctx.author.id,
+            timeout=timeout,
+            accent_color=accent,
+        )
+        msg = await ctx.send(view=view)
+        view.message = msg
+        self._active_views[msg.id] = view
+        return msg
