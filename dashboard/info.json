@@ -1,0 +1,12 @@
+{
+    "author": ["everestmcarthur"],
+    "install_msg": "**EveDash** — Web Dashboard for Red-DiscordBot\n\nRun `[p]evedash setup` to configure your dashboard.\nSee the README for full documentation.",
+    "name": "EveDash",
+    "short": "A modern, self-contained web dashboard for Red-DiscordBot.",
+    "description": "EveDash is a sleek, Discord-inspired web dashboard that lets you manage your Red bot from a browser. Features Discord OAuth2 login, guild management, cog control, command toggles, real-time WebSocket updates, and a powerful SDK that lets any cog register its own settings pages with just a few lines of code.",
+    "requirements": ["aiohttp"],
+    "tags": ["dashboard", "web", "admin", "management", "ui"],
+    "min_bot_version": "3.5.0",
+    "type": "COG",
+    "end_user_data_statement": "This cog stores Discord user IDs for authentication sessions and blacklist management. No message content is stored."
+}
