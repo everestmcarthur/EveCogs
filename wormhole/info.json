@@ -1,0 +1,18 @@
+{
+    "author": ["everestmcarthur"],
+    "description": "Wormhole — an advanced cross-server/cross-channel communication relay with named networks, moderation, staff roles, message sync (edits/deletes/replies/reactions), per-network customisation, logging, statistics, filters, rate-limiting, and much more.",
+    "install_msg": "Thanks for installing **Wormhole**!  Run `[p]wh help` to get started.",
+    "short": "Advanced cross-server relay with networks, moderation & full sync",
+    "end_user_data_statement": "This cog stores user IDs, guild IDs, channel IDs, and message-mapping data required for relay functionality. No message content is stored persistently.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "tags": [
+        "wormhole",
+        "relay",
+        "bridge",
+        "cross-server",
+        "network",
+        "moderation",
+        "webhook"
+    ]
+}

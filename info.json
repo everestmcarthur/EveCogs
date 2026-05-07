@@ -1,0 +1,6 @@
+{
+    "author": ["everestmcarthur"],
+    "description": "EveCogs — a curated collection of advanced, professional-grade cogs for Red-DiscordBot.",
+    "install_msg": "Thank you for installing **EveCogs**! Browse available cogs with `[p]cog list` and install what you need.",
+    "short": "Advanced cogs for Red-DiscordBot"
+}
