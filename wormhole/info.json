@@ -1,10 +1,10 @@
 {
     "author": ["everestmcarthur"],
-    "install_msg": "Thanks for installing **Wormhole v3.2.0** — the ultimate cross-server relay!\n\nGet started: `[p]wh create <network-name>` then `[p]wh open <network-name>` in channels you want to link.\n\nFull help: `[p]wh help`",
+    "install_msg": "Thanks for installing **Wormhole v3.3.0** — the ultimate cross-server relay!\n\nGet started: `[p]wh create <network-name>` then `[p]wh open <network-name>` in channels you want to link.\n\nFull help: `[p]wh help`",
     "name": "Wormhole",
     "disabled": false,
-    "short": "The ultimate cross-server message relay with DM relay, starboard, karma, auto-mod, invites & more.",
-    "description": "Wormhole v3.2.0 connects Discord channels across multiple servers into named networks. Messages, edits, deletes, reactions, replies, stickers, pins, typing indicators, and files are all relayed in real-time via webhooks, embeds, or compact text. Features include: bidirectional DM relay, cross-network starboard, reputation/karma system, keyword highlight notifications, auto-moderation engine (spam/caps/invites/links/zalgo/raid detection), network invite codes with vanity URLs, staff announcements, persistent portal embeds, user profiles and stats, backup/restore, blackout scheduling, message search, scheduled messages, per-channel overrides, network discovery, relay delay, slowmode, purge, audit log, attachment filters, and a global blocklist.",
+    "short": "The ultimate cross-server message relay with DM relay, starboard, karma, auto-mod, polls, analytics & more.",
+    "description": "Wormhole v3.3.0 connects Discord channels across multiple servers into named networks. Messages, edits, deletes, reactions, replies, stickers, pins, typing indicators, and files are all relayed in real-time via webhooks, embeds, or compact text. Features include: bidirectional DM relay, cross-network starboard, reputation/karma system, keyword highlight notifications, auto-moderation engine (spam/caps/invites/links/zalgo/raid detection), network invite codes with vanity URLs, staff announcements, persistent portal embeds, user profiles and stats, backup/restore, blackout scheduling, message search, scheduled messages, per-channel overrides, network discovery, relay delay, slowmode, purge, audit log, attachment filters, global blocklist, anonymous mode, one-way mirror channels, network-wide polls, AFK system, personal ignore lists, auto-responses, ephemeral messages, media-only mode, network analytics dashboard, relay health monitoring, message bookmarks, user vanity colours, quiet hours for DM relay, and inter-network bridging.",
     "tags": [
         "relay",
         "crossserver",
@@ -18,10 +18,13 @@
         "starboard",
         "karma",
         "dm",
-        "global"
+        "global",
+        "analytics",
+        "polls",
+        "anonymous"
     ],
     "type": "COG",
-    "end_user_data_statement": "This cog stores Discord user IDs, guild IDs, and channel IDs for relay functionality. Per-user data includes message counts, karma scores, keyword highlights, and DM relay subscriptions.",
+    "end_user_data_statement": "This cog stores Discord user IDs, guild IDs, and channel IDs for relay functionality. Per-user data includes message counts, karma scores, keyword highlights, DM relay subscriptions, bookmarks, AFK status, ignore lists, colour preferences, quiet hour settings, and analytics counters.",
     "min_bot_version": "3.5.0",
     "min_python_version": [3, 9, 0],
     "requirements": []

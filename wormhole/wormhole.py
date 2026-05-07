@@ -1,5 +1,5 @@
 """
-Wormhole v3.2.0 — The Ultimate Cross-Server Relay Cog for Red-DiscordBot
+Wormhole v3.3.0 — The Ultimate Cross-Server Relay Cog for Red-DiscordBot
 =========================================================================
 
 Phase 1: Named networks, webhook relay, edit/delete/reply/reaction/sticker sync,
@@ -12,20 +12,27 @@ Phase 3: DM relay (bidirectional), pin sync, starboard, audit log, anti-raid,
           invites, keyword highlights/notifications, network roles, per-channel
           overrides, scheduled messages, purge, typing indicators, network
           discovery, message search, slowmode
+Phase 4: Hardened command filtering, anonymous mode, personal ignore lists,
+          one-way mirror channels, network-wide polls, AFK system, ephemeral
+          messages, auto-responses, media-only mode, network analytics,
+          relay health monitor, message bookmarks, user colours, quiet hours,
+          network bridging
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
+import random
 import re
 import time
 from collections import defaultdict
 from copy import deepcopy
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Set, Tuple
 
 import discord
 from redbot.core import Config, checks, commands
@@ -186,6 +193,39 @@ _DEFAULT_NETWORK = {
     "tags": [],
     # Typing indicator relay
     "sync_typing": False,
+    # ── Phase 4 ──
+    # Anonymous mode
+    "anonymous": False,
+    "anon_salt": "",                # random salt per-network for hashing
+    # One-way mirror channels (receive-only, messages FROM these channels are NOT relayed)
+    "mirror_channels": [],          # channel IDs that are receive-only
+    # Ephemeral messages (auto-delete relayed messages after N seconds, 0=disabled)
+    "ephemeral_delay": 0,
+    # Auto-responses (staff-configured pattern → reply pairs)
+    "auto_responses": {},           # {pattern_str: {reply: str, regex: bool, cooldown: int, last_used: float}}
+    # Media-only mode (only relay messages that have attachments/embeds)
+    "media_only": False,
+    # Network analytics (rolling counters)
+    "analytics": {
+        "hourly": {},               # {"YYYY-MM-DD-HH": count}
+        "top_users": {},            # {user_id_str: count}  (rolling — pruned monthly)
+    },
+    # Relay health
+    "last_health_check": None,
+    "unhealthy_channels": [],
+    # Polls
+    "active_polls": {},             # {poll_id: {question, options, votes, author, created, expires, msg_map}}
+    # AFK system
+    "afk_users": {},                # {user_id_str: {reason, since_iso}}
+    # Personal ignore list (per-user, not relayed to them in DM)
+    "user_ignores": {},             # {user_id_str: [ignored_user_ids]}
+    # User vanity colours
+    "user_colours": {},             # {user_id_str: int (hex colour)}
+    # Quiet hours (per-user DM mute windows)
+    "quiet_hours": {},              # {user_id_str: {start_hour: int, end_hour: int, tz_offset: int}}
+    # Network bridging (one-way feeds from other networks)
+    "bridge_from": [],              # network names whose messages also appear here
+    "bridge_to": [],                # network names that receive our messages
 }
 
 _DEFAULT_GLOBAL = {
@@ -193,6 +233,8 @@ _DEFAULT_GLOBAL = {
     "max_networks_per_user": 10,
     "global_banned_users": [],
     "global_banned_servers": [],
+    # Bookmarks (global per-user)
+    "bookmarks": {},                # {user_id_str: [{content, author, server, channel, timestamp}]}
 }
 
 _MAP_LIMIT = 2_000
@@ -229,7 +271,7 @@ class _MessageMap:
 class Wormhole(commands.Cog):
     """The ultimate cross-server relay: networks, DMs, starboard, auto-mod, invites, portals & more."""
 
-    __version__ = "3.2.0"
+    __version__ = "3.3.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -242,6 +284,8 @@ class Wormhole(commands.Cog):
         self.dup_detectors: Dict[str, DuplicateDetector] = {}
         self.raid_detectors: Dict[str, RaidDetector] = {}
         self.msg_map = _MessageMap()
+        self._autoresponse_cooldowns: Dict[str, float] = {}  # "net:pattern" -> last_trigger
+        self._ephemeral_tasks: List[asyncio.Task] = []
 
         self._ready = asyncio.Event()
         self._bg_tasks: List[asyncio.Task] = []
@@ -259,7 +303,9 @@ class Wormhole(commands.Cog):
             self._bg_tasks.append(asyncio.ensure_future(self._blackout_loop()))
             self._bg_tasks.append(asyncio.ensure_future(self._portal_update_loop()))
             self._bg_tasks.append(asyncio.ensure_future(self._scheduled_msg_loop()))
-            log.info("Wormhole v3.2.0 ready — %d networks loaded.", len(networks))
+            self._bg_tasks.append(asyncio.ensure_future(self._health_check_loop()))
+            self._bg_tasks.append(asyncio.ensure_future(self._poll_expiry_loop()))
+            log.info("Wormhole v3.3.0 ready — %d networks loaded.", len(networks))
         except Exception as exc:
             log.error("Wormhole init error (relay will still work): %s", exc, exc_info=True)
         finally:
@@ -367,6 +413,80 @@ class Wormhole(commands.Cog):
             except Exception as e:
                 log.error("Scheduled msg loop: %s", e)
                 await asyncio.sleep(30)
+
+    async def _health_check_loop(self):
+        """Periodically check that all linked channels are still accessible."""
+        await self._ready.wait()
+        while True:
+            try:
+                await asyncio.sleep(900)  # every 15 min
+                async with self.config.networks() as networks:
+                    for name, data in networks.items():
+                        unhealthy = []
+                        for ch_id in data.get("channels", []):
+                            ch = self.bot.get_channel(ch_id)
+                            if not ch:
+                                unhealthy.append(ch_id)
+                                continue
+                            perms = ch.permissions_for(ch.guild.me)
+                            if not perms.send_messages:
+                                unhealthy.append(ch_id)
+                        networks[name]["unhealthy_channels"] = unhealthy
+                        networks[name]["last_health_check"] = datetime.now(timezone.utc).isoformat()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.error("Health check loop: %s", e)
+                await asyncio.sleep(900)
+
+    async def _poll_expiry_loop(self):
+        """Check for expired polls and close them."""
+        await self._ready.wait()
+        while True:
+            try:
+                await asyncio.sleep(60)
+                now = datetime.now(timezone.utc)
+                async with self.config.networks() as networks:
+                    for name, data in networks.items():
+                        polls = data.get("active_polls", {})
+                        expired = []
+                        for pid, poll in polls.items():
+                            if poll.get("expires"):
+                                exp = datetime.fromisoformat(poll["expires"])
+                                if now >= exp:
+                                    expired.append(pid)
+                        for pid in expired:
+                            poll = polls.pop(pid)
+                            # Announce results
+                            results = self._format_poll_results(poll)
+                            em = info_embed(results, title=f"📊 Poll Closed — {poll.get('question', '?')}")
+                            for ch_id in data.get("channels", []):
+                                ch = self.bot.get_channel(ch_id)
+                                if ch:
+                                    try: await ch.send(embed=em)
+                                    except: pass
+                        networks[name]["active_polls"] = polls
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.error("Poll expiry loop: %s", e)
+                await asyncio.sleep(60)
+
+    @staticmethod
+    def _format_poll_results(poll: dict) -> str:
+        options = poll.get("options", [])
+        votes = poll.get("votes", {})
+        total = sum(len(v) for v in votes.values())
+        lines = []
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        for i, opt in enumerate(options):
+            count = len(votes.get(str(i), []))
+            pct = (count / total * 100) if total else 0
+            bar_len = int(pct / 5)
+            bar = "█" * bar_len + "░" * (20 - bar_len)
+            lines.append(f"{emojis[i] if i < len(emojis) else '•'} **{opt}**\n{bar} {count} ({pct:.0f}%)")
+        lines.append(f"\n**Total votes:** {total}")
+        return "\n".join(lines)
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -489,6 +609,125 @@ class Wormhole(commands.Cog):
                             pass
                     break  # one DM per message per user
 
+    def _anon_name(self, net_data: dict, user_id: int) -> str:
+        """Generate a consistent anonymous name for a user within a network."""
+        salt = net_data.get("anon_salt", "wormhole")
+        h = hashlib.sha256(f"{salt}:{user_id}".encode()).hexdigest()[:6]
+        return f"Anon#{h.upper()}"
+
+    def _anon_avatar(self, user_id: int) -> str:
+        """Generate a consistent avatar URL for anonymous users."""
+        idx = user_id % 5
+        return f"https://cdn.discordapp.com/embed/avatars/{idx}.png"
+
+    async def _record_analytics(self, net_name: str, user_id: int):
+        """Record a message for analytics."""
+        now = datetime.now(timezone.utc)
+        hour_key = now.strftime("%Y-%m-%d-%H")
+        uid_str = str(user_id)
+        async with self.config.networks() as nets:
+            if net_name not in nets:
+                return
+            analytics = nets[net_name].setdefault("analytics", {"hourly": {}, "top_users": {}})
+            analytics["hourly"][hour_key] = analytics["hourly"].get(hour_key, 0) + 1
+            analytics["top_users"][uid_str] = analytics["top_users"].get(uid_str, 0) + 1
+            # Prune old hourly data (keep last 7 days = 168 hours)
+            if len(analytics["hourly"]) > 200:
+                sorted_keys = sorted(analytics["hourly"].keys())
+                for k in sorted_keys[:-168]:
+                    analytics["hourly"].pop(k, None)
+
+    async def _check_auto_responses(self, net_name: str, net_data: dict, message: discord.Message):
+        """Check and trigger auto-responses."""
+        auto_resp = net_data.get("auto_responses", {})
+        if not auto_resp:
+            return
+        for pattern, cfg in auto_resp.items():
+            cooldown_key = f"{net_name}:{pattern}"
+            cooldown = cfg.get("cooldown", 30)
+            last = self._autoresponse_cooldowns.get(cooldown_key, 0)
+            if time.monotonic() - last < cooldown:
+                continue
+            matched = False
+            if cfg.get("regex"):
+                try:
+                    if re.search(pattern, message.content, re.IGNORECASE):
+                        matched = True
+                except re.error:
+                    pass
+            else:
+                if pattern.lower() in message.content.lower():
+                    matched = True
+            if matched:
+                self._autoresponse_cooldowns[cooldown_key] = time.monotonic()
+                reply = cfg.get("reply", "")
+                if reply:
+                    reply = reply.replace("{user}", message.author.display_name).replace("{server}", message.guild.name)
+                    try:
+                        await message.channel.send(embed=info_embed(reply, title="🤖 Auto-Response"))
+                    except:
+                        pass
+                break  # one auto-response per message
+
+    async def _schedule_ephemeral_delete(self, msg: discord.Message, delay: int):
+        """Schedule a message for deletion after delay seconds."""
+        async def _delete_after():
+            await asyncio.sleep(delay)
+            try:
+                await msg.delete()
+            except:
+                pass
+        task = asyncio.ensure_future(_delete_after())
+        self._ephemeral_tasks.append(task)
+        # Clean up finished tasks
+        self._ephemeral_tasks = [t for t in self._ephemeral_tasks if not t.done()]
+
+    async def _check_afk(self, net_name: str, net_data: dict, message: discord.Message):
+        """Check if message author was AFK (clear it) and if message mentions AFK users."""
+        afk = net_data.get("afk_users", {})
+        uid_str = str(message.author.id)
+        # Clear AFK if user sends a message
+        if uid_str in afk:
+            async with self.config.networks() as nets:
+                if net_name in nets:
+                    nets[net_name].get("afk_users", {}).pop(uid_str, None)
+            since = afk[uid_str].get("since", "?")
+            try:
+                await message.channel.send(
+                    embed=info_embed(f"Welcome back, **{message.author.display_name}**! AFK removed.", title="💤"),
+                    delete_after=10
+                )
+            except:
+                pass
+        # Notify if mentioned users are AFK
+        for user in message.mentions:
+            u_str = str(user.id)
+            if u_str in afk:
+                reason = afk[u_str].get("reason", "No reason given")
+                since = afk[u_str].get("since", "Unknown")[:16]
+                try:
+                    await message.channel.send(
+                        embed=info_embed(f"**{user.display_name}** is AFK: {reason}\n*Since {since}*", title="💤 AFK"),
+                        delete_after=15
+                    )
+                except:
+                    pass
+
+    def _is_quiet_hour(self, net_data: dict, user_id: int) -> bool:
+        """Check if a user is in their quiet hours right now."""
+        qh = net_data.get("quiet_hours", {}).get(str(user_id))
+        if not qh:
+            return False
+        tz_offset = qh.get("tz_offset", 0)
+        now_user = datetime.now(timezone.utc) + timedelta(hours=tz_offset)
+        h = now_user.hour
+        start = qh.get("start_hour", 0)
+        end = qh.get("end_hour", 0)
+        if start <= end:
+            return start <= h < end
+        else:
+            return h >= start or h < end
+
     async def _relay_to_dm_subs(self, net_name, net_data, message):
         """Forward a network message to all DM subscribers."""
         if not net_data.get("dm_enabled"):
@@ -497,18 +736,28 @@ class Wormhole(commands.Cog):
         if not subs:
             return
         dm_mode = net_data.get("dm_relay_mode", "embed")
+        is_anon = net_data.get("anonymous", False)
         for uid in subs:
             if uid == message.author.id:
+                continue
+            # Personal ignore list
+            ignores = net_data.get("user_ignores", {}).get(str(uid), [])
+            if message.author.id in ignores:
+                continue
+            # Quiet hours
+            if self._is_quiet_hour(net_data, uid):
                 continue
             user = self.bot.get_user(uid)
             if not user:
                 continue
             try:
                 nick = net_data.get("server_nicknames", {}).get(str(message.guild.id))
+                display_name = self._anon_name(net_data, message.author.id) if is_anon else message.author.display_name
+                display_avatar = self._anon_avatar(message.author.id) if is_anon else message.author.display_avatar.url
                 if dm_mode == "embed":
                     em = build_dm_incoming_embed(
-                        message.author.display_name,
-                        message.author.display_avatar.url,
+                        display_name,
+                        display_avatar,
                         nick or message.guild.name,
                         message.channel.name,
                         message.content,
@@ -518,10 +767,10 @@ class Wormhole(commands.Cog):
                     await user.send(embed=em)
                 elif dm_mode == "compact":
                     server = nick or message.guild.name
-                    text = f"**[{server}] {message.author.display_name}:** {truncate(message.content, 1800)}"
+                    text = f"**[{server}] {display_name}:** {truncate(message.content, 1800)}"
                     await user.send(text)
                 else:
-                    await user.send(f"**{message.author.display_name}** ({message.guild.name}): {truncate(message.content, 1800)}")
+                    await user.send(f"**{display_name}** ({message.guild.name}): {truncate(message.content, 1800)}")
             except Exception:
                 pass
 
@@ -704,7 +953,7 @@ class Wormhole(commands.Cog):
             ch = self.bot.get_channel(ch_id)
             channels_list.append(f"• **{ch.guild.name}** › #{ch.name}" if ch else f"• `{ch_id}`")
         if channels_list: em.add_field(name="Channels", value="\n".join(channels_list), inline=False)
-        if d.get("created_at"): em.set_footer(text=f"Created {d['created_at'][:10]} • v3.2.0")
+        if d.get("created_at"): em.set_footer(text=f"Created {d['created_at'][:10]} • v{self.__version__}")
         if d.get("custom_icon"): em.set_thumbnail(url=d["custom_icon"])
         await ctx.send(embed=em)
 
@@ -1896,6 +2145,597 @@ class Wormhole(commands.Cog):
         await ctx.send(embed=info_embed("\n".join(results) if results else "No results.", title=f"🔍 Search — {name}"))
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  ANONYMOUS MODE
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh_set.command(name="anonymous", aliases=["anon"])
+    async def wh_set_anon(self, ctx, name: str, toggle: bool):
+        """Toggle anonymous mode — hides real usernames."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            n[name]["anonymous"] = toggle
+            if toggle and not n[name].get("anon_salt"):
+                n[name]["anon_salt"] = hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
+        msg = "enabled — all usernames will be hidden" if toggle else "disabled"
+        await ctx.send(embed=ok_embed(f"Anonymous mode {msg} for **{name}**."))
+        await self._audit(name, "set anonymous", ctx.author, details=str(toggle))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  MIRROR CHANNELS (one-way / receive-only)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.group(name="mirror", invoke_without_command=True)
+    async def wh_mirror(self, ctx):
+        """Manage one-way mirror channels (receive-only)."""
+        await ctx.send_help(ctx.command)
+
+    @wh_mirror.command(name="add")
+    @commands.guild_only()
+    async def wh_mirror_add(self, ctx, name: str):
+        """Make this channel receive-only (messages here won't relay out)."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        if ctx.channel.id not in d.get("channels", []):
+            return await ctx.send(embed=err_embed("Channel not linked to this network."))
+        async with self.config.networks() as n:
+            mirrors = n[name].setdefault("mirror_channels", [])
+            if ctx.channel.id not in mirrors:
+                mirrors.append(ctx.channel.id)
+        await ctx.send(embed=ok_embed(f"This channel is now *receive-only* on **{name}**. Messages sent here won't relay out."))
+
+    @wh_mirror.command(name="remove")
+    @commands.guild_only()
+    async def wh_mirror_rm(self, ctx, name: str):
+        """Remove mirror (receive-only) status from this channel."""
+        name = name.lower()
+        async with self.config.networks() as n:
+            if name in n:
+                mirrors = n[name].get("mirror_channels", [])
+                if ctx.channel.id in mirrors:
+                    mirrors.remove(ctx.channel.id)
+        await ctx.send(embed=ok_embed("This channel is now two-way again."))
+
+    @wh_mirror.command(name="list")
+    async def wh_mirror_ls(self, ctx, name: str):
+        """List mirror channels."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return
+        mirrors = d.get("mirror_channels", [])
+        if not mirrors:
+            return await ctx.send(embed=info_embed("No mirror channels.", title=f"Mirror — {name}"))
+        lines = []
+        for cid in mirrors:
+            ch = self.bot.get_channel(cid)
+            lines.append(f"• {ch.guild.name} › #{ch.name}" if ch else f"• `{cid}`")
+        await ctx.send(embed=info_embed("\n".join(lines), title=f"Mirror (receive-only) — {name}"))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  POLLS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.group(name="poll", invoke_without_command=True)
+    async def wh_poll(self, ctx):
+        """Network-wide polls."""
+        await ctx.send_help(ctx.command)
+
+    @wh_poll.command(name="create")
+    async def wh_poll_create(self, ctx, name: str, minutes: int, question: str, *, options: str):
+        """Create a poll. Options separated by |. Ex: `[p]wh poll create net 60 "Favourite?" Option A | Option B | Option C`"""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        opts = [o.strip() for o in options.split("|") if o.strip()]
+        if len(opts) < 2 or len(opts) > 10:
+            return await ctx.send(embed=err_embed("2–10 options required, separated by `|`."))
+        poll_id = hashlib.sha256(f"{name}{time.time()}{random.random()}".encode()).hexdigest()[:8]
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        expires = datetime.fromtimestamp(time.time() + minutes * 60, tz=timezone.utc).isoformat() if minutes > 0 else None
+        poll_data = {
+            "question": question, "options": opts,
+            "votes": {str(i): [] for i in range(len(opts))},
+            "author": ctx.author.id, "created": datetime.now(timezone.utc).isoformat(),
+            "expires": expires, "msg_map": {},
+        }
+        # Build embed
+        lines = [f"{emojis[i]} **{opt}**" for i, opt in enumerate(opts)]
+        desc = f"**{question}**\n\n" + "\n".join(lines) + f"\n\nReact to vote! Poll ID: `{poll_id}`"
+        if expires:
+            desc += f"\nExpires in {minutes} minutes."
+        em = info_embed(desc, title=f"📊 Poll — {name}")
+        em.set_footer(text=f"Created by {ctx.author.display_name}")
+        # Send to all channels
+        msg_map = {}
+        for ch_id in d["channels"]:
+            ch = self.bot.get_channel(ch_id)
+            if not ch: continue
+            try:
+                msg = await ch.send(embed=em)
+                for i in range(len(opts)):
+                    await msg.add_reaction(emojis[i])
+                msg_map[str(ch_id)] = msg.id
+            except: pass
+        poll_data["msg_map"] = msg_map
+        async with self.config.networks() as n:
+            n[name].setdefault("active_polls", {})[poll_id] = poll_data
+        await ctx.send(embed=ok_embed(f"Poll `{poll_id}` created in {len(msg_map)} channels!"))
+
+    @wh_poll.command(name="close")
+    async def wh_poll_close(self, ctx, name: str, poll_id: str):
+        """Close a poll and show results."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        polls = d.get("active_polls", {})
+        if poll_id not in polls:
+            return await ctx.send(embed=err_embed(f"Poll `{poll_id}` not found."))
+        poll = polls[poll_id]
+        # Tally votes from reactions
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        votes = {str(i): set() for i in range(len(poll["options"]))}
+        for ch_id_str, msg_id in poll.get("msg_map", {}).items():
+            ch = self.bot.get_channel(int(ch_id_str))
+            if not ch: continue
+            try:
+                msg = await ch.fetch_message(msg_id)
+                for i, react in enumerate(msg.reactions):
+                    if str(react.emoji) in emojis[:len(poll["options"])]:
+                        idx = emojis.index(str(react.emoji))
+                        async for user in react.users():
+                            if not user.bot:
+                                votes[str(idx)].add(user.id)
+            except: pass
+        # Convert sets to lists for storage/display
+        final_votes = {k: list(v) for k, v in votes.items()}
+        poll["votes"] = final_votes
+        results = self._format_poll_results(poll)
+        em = info_embed(results, title=f"📊 Poll Closed — {poll['question']}")
+        for ch_id in d["channels"]:
+            ch = self.bot.get_channel(ch_id)
+            if ch:
+                try: await ch.send(embed=em)
+                except: pass
+        async with self.config.networks() as n:
+            n[name].get("active_polls", {}).pop(poll_id, None)
+        await ctx.send(embed=ok_embed("Poll closed and results posted."))
+
+    @wh_poll.command(name="list")
+    async def wh_poll_ls(self, ctx, name: str):
+        """List active polls."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return
+        polls = d.get("active_polls", {})
+        if not polls:
+            return await ctx.send(embed=info_embed("No active polls.", title=f"Polls — {name}"))
+        lines = []
+        for pid, p in polls.items():
+            exp = f" (expires {p['expires'][:16]})" if p.get("expires") else " (no expiry)"
+            lines.append(f"`{pid}` — {p['question']}{exp}")
+        await ctx.send(embed=info_embed("\n".join(lines), title=f"Active Polls — {name}"))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  AFK SYSTEM
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.command(name="afk")
+    async def wh_afk(self, ctx, name: str, *, reason: str = "AFK"):
+        """Set yourself as AFK. Auto-cleared when you send a message."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        async with self.config.networks() as n:
+            n[name].setdefault("afk_users", {})[str(ctx.author.id)] = {
+                "reason": reason[:200],
+                "since": datetime.now(timezone.utc).isoformat(),
+            }
+        await ctx.send(embed=ok_embed(f"You're now AFK: *{reason}*\nSend any message in a linked channel to clear."))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  PERSONAL IGNORE LIST
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.group(name="ignore", invoke_without_command=True)
+    async def wh_ignore(self, ctx):
+        """Manage your personal ignore list (DM relay only)."""
+        await ctx.send_help(ctx.command)
+
+    @wh_ignore.command(name="add")
+    async def wh_ignore_add(self, ctx, name: str, user: discord.User):
+        """Ignore a user — their messages won't appear in your DM relay."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        uid = str(ctx.author.id)
+        async with self.config.networks() as n:
+            ignores = n[name].setdefault("user_ignores", {}).setdefault(uid, [])
+            if user.id not in ignores:
+                ignores.append(user.id)
+        await ctx.send(embed=ok_embed(f"Ignoring **{user.display_name}** on **{name}**."))
+
+    @wh_ignore.command(name="remove")
+    async def wh_ignore_rm(self, ctx, name: str, user: discord.User):
+        """Stop ignoring a user."""
+        name = name.lower()
+        uid = str(ctx.author.id)
+        async with self.config.networks() as n:
+            if name in n:
+                ignores = n[name].get("user_ignores", {}).get(uid, [])
+                if user.id in ignores:
+                    ignores.remove(user.id)
+        await ctx.send(embed=ok_embed(f"No longer ignoring **{user.display_name}**."))
+
+    @wh_ignore.command(name="list")
+    async def wh_ignore_ls(self, ctx, name: str):
+        """Show your ignore list."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return
+        ignores = d.get("user_ignores", {}).get(str(ctx.author.id), [])
+        if not ignores:
+            return await ctx.send(embed=info_embed("Empty.", title="Ignore List"))
+        lines = [f"• {self.bot.get_user(uid) or uid}" for uid in ignores]
+        await ctx.send(embed=info_embed("\n".join(lines), title=f"Your Ignores — {name}"))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  AUTO-RESPONSES
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.group(name="autoreply", aliases=["ar"], invoke_without_command=True)
+    async def wh_ar(self, ctx):
+        """Manage auto-responses (staff)."""
+        await ctx.send_help(ctx.command)
+
+    @wh_ar.command(name="add")
+    async def wh_ar_add(self, ctx, name: str, trigger: str, *, reply: str):
+        """Add an auto-response. Use {user} and {server} in the reply."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            n[name].setdefault("auto_responses", {})[trigger] = {
+                "reply": reply[:500], "regex": False, "cooldown": 30, "last_used": 0,
+            }
+        await ctx.send(embed=ok_embed(f"Auto-response: `{trigger}` → {reply[:100]}"))
+
+    @wh_ar.command(name="add-regex")
+    async def wh_ar_add_rx(self, ctx, name: str, pattern: str, *, reply: str):
+        """Add a regex auto-response."""
+        try: re.compile(pattern)
+        except re.error as e: return await ctx.send(embed=err_embed(f"Invalid regex: {e}"))
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            n[name].setdefault("auto_responses", {})[pattern] = {
+                "reply": reply[:500], "regex": True, "cooldown": 30, "last_used": 0,
+            }
+        await ctx.send(embed=ok_embed(f"Regex auto-response: `{pattern}` → {reply[:100]}"))
+
+    @wh_ar.command(name="remove")
+    async def wh_ar_rm(self, ctx, name: str, *, trigger: str):
+        """Remove an auto-response."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            n[name].get("auto_responses", {}).pop(trigger, None)
+        await ctx.send(embed=ok_embed(f"Auto-response `{trigger}` removed."))
+
+    @wh_ar.command(name="cooldown")
+    async def wh_ar_cd(self, ctx, name: str, trigger: str, seconds: int):
+        """Set cooldown between auto-response triggers."""
+        name = name.lower()
+        async with self.config.networks() as n:
+            if name in n and trigger in n[name].get("auto_responses", {}):
+                n[name]["auto_responses"][trigger]["cooldown"] = max(5, seconds)
+        await ctx.send(embed=ok_embed(f"Cooldown → {seconds}s."))
+
+    @wh_ar.command(name="list")
+    async def wh_ar_ls(self, ctx, name: str):
+        """List auto-responses."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return
+        ar = d.get("auto_responses", {})
+        if not ar:
+            return await ctx.send(embed=info_embed("None.", title=f"Auto-Responses — {name}"))
+        lines = []
+        for trigger, cfg in ar.items():
+            typ = "regex" if cfg.get("regex") else "word"
+            lines.append(f"`{trigger}` ({typ}) → {truncate(cfg.get('reply', ''), 60)} [cd: {cfg.get('cooldown', 30)}s]")
+        await ctx.send(embed=info_embed("\n".join(lines), title=f"Auto-Responses — {name}"))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  EPHEMERAL MESSAGES
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh_set.command(name="ephemeral")
+    async def wh_set_ephemeral(self, ctx, name: str, seconds: int):
+        """Auto-delete relayed messages after N seconds (0=disabled, max 3600)."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        val = min(3600, max(0, seconds))
+        async with self.config.networks() as n: n[name]["ephemeral_delay"] = val
+        msg = f"Relayed messages will auto-delete after {val}s." if val else "Ephemeral mode disabled."
+        await ctx.send(embed=ok_embed(msg))
+
+    @wh_set.command(name="media-only")
+    async def wh_set_media(self, ctx, name: str, toggle: bool):
+        """Only relay messages that have attachments/images."""
+        await self._toggle(ctx, name, "media_only", toggle)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  BOOKMARKS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.group(name="bookmark", aliases=["bm"], invoke_without_command=True)
+    async def wh_bm(self, ctx):
+        """Save and view message bookmarks."""
+        await ctx.send_help(ctx.command)
+
+    @wh_bm.command(name="save")
+    async def wh_bm_save(self, ctx, message_id: int = None):
+        """Bookmark a message. Reply to a message or provide ID."""
+        target = None
+        if ctx.message.reference and ctx.message.reference.message_id:
+            try:
+                target = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+            except: pass
+        elif message_id:
+            try:
+                target = await ctx.channel.fetch_message(message_id)
+            except: pass
+        if not target:
+            return await ctx.send(embed=err_embed("Reply to a message or provide a message ID."))
+        bm = {
+            "content": truncate(target.content, 500),
+            "author": str(target.author),
+            "server": target.guild.name if target.guild else "DM",
+            "channel": target.channel.name,
+            "timestamp": target.created_at.isoformat(),
+            "jump_url": target.jump_url,
+        }
+        uid = str(ctx.author.id)
+        async with self.config.bookmarks() as bookmarks:
+            bookmarks.setdefault(uid, []).append(bm)
+            if len(bookmarks[uid]) > 50:
+                bookmarks[uid] = bookmarks[uid][-50:]
+        await ctx.send(embed=ok_embed("Bookmarked! View with `[p]wh bookmark list`."))
+        # Also DM the bookmark
+        try:
+            em = info_embed(
+                f"**{bm['author']}** in #{bm['channel']} ({bm['server']}):\n\n> {bm['content']}\n\n[Jump]({bm['jump_url']})",
+                title="🔖 Bookmark Saved"
+            )
+            await ctx.author.send(embed=em)
+        except: pass
+
+    @wh_bm.command(name="list")
+    async def wh_bm_ls(self, ctx):
+        """View your bookmarks."""
+        bookmarks = await self.config.bookmarks()
+        bms = bookmarks.get(str(ctx.author.id), [])
+        if not bms:
+            return await ctx.send(embed=info_embed("No bookmarks.", title="🔖 Bookmarks"))
+        lines = []
+        for i, bm in enumerate(reversed(bms[-15:]), 1):
+            ts = bm.get("timestamp", "?")[:10]
+            lines.append(f"**{i}.** {bm['author']} — {truncate(bm['content'], 60)}\n    *{bm['server']} › #{bm['channel']} • {ts}*")
+        await ctx.send(embed=info_embed("\n".join(lines), title="🔖 Your Bookmarks"))
+
+    @wh_bm.command(name="clear")
+    async def wh_bm_clear(self, ctx):
+        """Clear all your bookmarks."""
+        async with self.config.bookmarks() as bookmarks:
+            bookmarks.pop(str(ctx.author.id), None)
+        await ctx.send(embed=ok_embed("Bookmarks cleared."))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  USER COLOURS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.command(name="colour", aliases=["color", "mycolour", "mycolor"])
+    async def wh_user_colour(self, ctx, name: str, hex_colour: str):
+        """Set your personal embed colour in a network (#hex)."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        try:
+            val = int(hex_colour.strip("#"), 16)
+        except ValueError:
+            return await ctx.send(embed=err_embed("Invalid hex colour. Use format `#FF5733`."))
+        async with self.config.networks() as n:
+            n[name].setdefault("user_colours", {})[str(ctx.author.id)] = val
+        c = discord.Colour(val)
+        await ctx.send(embed=discord.Embed(description=f"Your colour is now **#{hex_colour.strip('#').upper()}** on **{name}**.", colour=c))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  QUIET HOURS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.command(name="quiet")
+    async def wh_quiet(self, ctx, name: str, start_hour: int, end_hour: int, utc_offset: int = 0):
+        """Set quiet hours — DM relay paused during these hours. Ex: `[p]wh quiet net 23 7 -5`"""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not (0 <= start_hour <= 23 and 0 <= end_hour <= 23):
+            return await ctx.send(embed=err_embed("Hours must be 0–23."))
+        async with self.config.networks() as n:
+            n[name].setdefault("quiet_hours", {})[str(ctx.author.id)] = {
+                "start_hour": start_hour, "end_hour": end_hour, "tz_offset": utc_offset,
+            }
+        await ctx.send(embed=ok_embed(f"Quiet hours: {start_hour:02d}:00–{end_hour:02d}:00 (UTC{utc_offset:+d}). DMs paused during this time."))
+
+    @wh.command(name="quiet-off")
+    async def wh_quiet_off(self, ctx, name: str):
+        """Disable quiet hours."""
+        name = name.lower()
+        async with self.config.networks() as n:
+            if name in n:
+                n[name].get("quiet_hours", {}).pop(str(ctx.author.id), None)
+        await ctx.send(embed=ok_embed("Quiet hours disabled."))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  NETWORK ANALYTICS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.command(name="analytics", aliases=["stats"])
+    async def wh_analytics(self, ctx, name: str):
+        """View network analytics — activity breakdown, top users, peak hours."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        analytics = d.get("analytics", {})
+        hourly = analytics.get("hourly", {})
+        top_users = analytics.get("top_users", {})
+
+        em = discord.Embed(title=f"📈 Analytics — {name}", colour=COLOUR_INFO)
+        em.add_field(name="Total Messages", value=f"{d.get('total_messages', 0):,}", inline=True)
+        em.add_field(name="Channels", value=str(len(d.get("channels", []))), inline=True)
+        em.add_field(name="DM Subscribers", value=str(len(d.get("dm_subscribers", []))), inline=True)
+
+        # Today's messages
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today_count = sum(v for k, v in hourly.items() if k.startswith(today))
+        em.add_field(name="Today", value=f"{today_count:,}", inline=True)
+
+        # Last 7 days
+        week_count = sum(hourly.values())
+        em.add_field(name="Last 7 Days", value=f"{week_count:,}", inline=True)
+
+        # Peak hour
+        if hourly:
+            hour_totals: Dict[int, int] = defaultdict(int)
+            for key, count in hourly.items():
+                try:
+                    hour = int(key.split("-")[-1])
+                    hour_totals[hour] += count
+                except: pass
+            if hour_totals:
+                peak = max(hour_totals, key=hour_totals.get)
+                em.add_field(name="Peak Hour (UTC)", value=f"{peak:02d}:00", inline=True)
+
+        # Activity chart (last 24 hours)
+        if hourly:
+            now = datetime.now(timezone.utc)
+            chart_lines = []
+            for h_offset in range(23, -1, -1):
+                ts = now - timedelta(hours=h_offset)
+                key = ts.strftime("%Y-%m-%d-%H")
+                count = hourly.get(key, 0)
+                bar = "█" * min(count, 30) if count else ""
+                if count or h_offset % 6 == 0:
+                    chart_lines.append(f"`{ts.strftime('%H')}` {bar} {count}")
+            if chart_lines:
+                em.add_field(name="Last 24h Activity", value="\n".join(chart_lines[-12:]), inline=False)
+
+        # Top users
+        if top_users:
+            top5 = sorted(top_users.items(), key=lambda x: x[1], reverse=True)[:5]
+            medals = ["🥇", "🥈", "🥉", "4.", "5."]
+            ulines = []
+            for i, (uid, count) in enumerate(top5):
+                u = self.bot.get_user(int(uid))
+                ulines.append(f"{medals[i]} {u.display_name if u else uid} — **{count:,}**")
+            em.add_field(name="Top Posters", value="\n".join(ulines), inline=False)
+
+        # Health status
+        unhealthy = d.get("unhealthy_channels", [])
+        if unhealthy:
+            em.add_field(name="⚠️ Unhealthy Channels", value=str(len(unhealthy)), inline=True)
+        last_hc = d.get("last_health_check")
+        if last_hc:
+            em.set_footer(text=f"Last health check: {last_hc[:16]}")
+
+        await ctx.send(embed=em)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  HEALTH
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.command(name="health")
+    async def wh_health(self, ctx, name: str):
+        """Check relay health for all channels in a network."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        lines = []
+        for ch_id in d.get("channels", []):
+            ch = self.bot.get_channel(ch_id)
+            if not ch:
+                lines.append(f"❌ `{ch_id}` — channel not visible")
+                continue
+            perms = ch.permissions_for(ch.guild.me)
+            issues = []
+            if not perms.send_messages: issues.append("no send")
+            if not perms.manage_webhooks: issues.append("no webhooks")
+            if not perms.read_messages: issues.append("no read")
+            if not perms.embed_links: issues.append("no embeds")
+            if not perms.attach_files: issues.append("no files")
+            status = "✅" if not issues else "⚠️"
+            label = f"{ch.guild.name} › #{ch.name}"
+            issue_text = f" — {', '.join(issues)}" if issues else ""
+            is_mirror = " 📥" if ch_id in d.get("mirror_channels", []) else ""
+            lines.append(f"{status} {label}{is_mirror}{issue_text}")
+        await ctx.send(embed=info_embed("\n".join(lines) if lines else "No channels.", title=f"🏥 Health — {name}"))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  NETWORK BRIDGING
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.group(name="bridge", invoke_without_command=True)
+    async def wh_bridge(self, ctx):
+        """Bridge networks together (one-way or two-way)."""
+        await ctx.send_help(ctx.command)
+
+    @wh_bridge.command(name="add")
+    async def wh_bridge_add(self, ctx, source: str, target: str, two_way: bool = False):
+        """Bridge messages from source network into target network's channels."""
+        source = source.lower(); target = target.lower()
+        sd = await self._net(source); td = await self._net(target)
+        if not sd: return await ctx.send(embed=err_embed(f"Source **{source}** not found."))
+        if not td: return await ctx.send(embed=err_embed(f"Target **{target}** not found."))
+        # Must be staff/owner on both
+        if not (await self._is_staff(sd, ctx.author.id) or await self.bot.is_owner(ctx.author)):
+            return await ctx.send(embed=err_embed(f"You must be staff on **{source}**."))
+        if not (await self._is_staff(td, ctx.author.id) or await self.bot.is_owner(ctx.author)):
+            return await ctx.send(embed=err_embed(f"You must be staff on **{target}**."))
+        async with self.config.networks() as n:
+            bt = n[source].setdefault("bridge_to", [])
+            if target not in bt: bt.append(target)
+            bf = n[target].setdefault("bridge_from", [])
+            if source not in bf: bf.append(source)
+            if two_way:
+                bt2 = n[target].setdefault("bridge_to", [])
+                if source not in bt2: bt2.append(source)
+                bf2 = n[source].setdefault("bridge_from", [])
+                if target not in bf2: bf2.append(target)
+        mode = "two-way" if two_way else "one-way"
+        await ctx.send(embed=ok_embed(f"Bridge ({mode}): **{source}** → **{target}**"))
+        await self._audit(source, "bridge_add", ctx.author, target=target, details=mode)
+
+    @wh_bridge.command(name="remove")
+    async def wh_bridge_rm(self, ctx, source: str, target: str):
+        """Remove a bridge."""
+        source = source.lower(); target = target.lower()
+        async with self.config.networks() as n:
+            if source in n:
+                bt = n[source].get("bridge_to", [])
+                if target in bt: bt.remove(target)
+            if target in n:
+                bf = n[target].get("bridge_from", [])
+                if source in bf: bf.remove(source)
+        await ctx.send(embed=ok_embed(f"Bridge **{source}** → **{target}** removed."))
+
+    @wh_bridge.command(name="list")
+    async def wh_bridge_ls(self, ctx, name: str):
+        """List bridges for a network."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return
+        bt = d.get("bridge_to", [])
+        bf = d.get("bridge_from", [])
+        lines = []
+        for t in bt: lines.append(f"→ **{t}** (outgoing)")
+        for f in bf: lines.append(f"← **{f}** (incoming)")
+        await ctx.send(embed=info_embed("\n".join(lines) if lines else "No bridges.", title=f"Bridges — {name}"))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  DEBUG
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2005,13 +2845,38 @@ class Wormhole(commands.Cog):
         if is_thread and not nd.get("sync_threads"): return
         if nd.get("frozen"): return
 
-        # Ignore commands (skip empty prefixes — they'd match everything)
-        try:
-            pfx = await self.bot.get_prefix(message)
-            if isinstance(pfx, str): pfx = [pfx]
-            if any(p and message.content.startswith(p) for p in pfx): return
-        except Exception:
-            pass
+        # ── HARDENED COMMAND FILTERING ──────────────────────────────────────
+        # 1. Filter Red bot commands by prefix
+        if message.content:
+            try:
+                pfx = await self.bot.get_prefix(message)
+                if isinstance(pfx, str): pfx = [pfx]
+                if any(p and message.content.startswith(p) for p in pfx): return
+            except Exception:
+                pass
+
+            # 2. Filter common bot command prefixes (!, ?, ., /, -, ~, $, >, ;, ,)
+            _CMD_CHARS = ("!", "?", ".", "/", "-", "~", "$", ">", ";", ",")
+            if len(message.content) >= 2 and message.content[0] in _CMD_CHARS and message.content[1].isalpha():
+                return
+
+            # 3. Filter slash-command style (starts with /)
+            if message.content.startswith("/"):
+                return
+
+            # 4. Filter messages that look like they're invoking a known cog command
+            ctx = await self.bot.get_context(message)
+            if ctx.valid:
+                return
+
+        # ── Mirror channel check (receive-only channels don't send) ────────
+        if eff_ch in nd.get("mirror_channels", []):
+            return
+
+        # ── Media-only filter ──────────────────────────────────────────────
+        if nd.get("media_only"):
+            if not message.attachments and not message.stickers and not (message.embeds and any(e.type in ("image", "video", "gifv") for e in message.embeds)):
+                return
 
         # NSFW gate
         if nd.get("nsfw_gate") and hasattr(message.channel, "is_nsfw") and message.channel.is_nsfw(): return
@@ -2093,18 +2958,38 @@ class Wormhole(commands.Cog):
         if delay > 0:
             await asyncio.sleep(min(delay, 30))
 
-        # Build payload
+        # ── AFK system ─────────────────────────────────────────────────────
+        await self._check_afk(net_name, nd, message)
+
+        # ── Auto-responses ─────────────────────────────────────────────────
+        await self._check_auto_responses(net_name, nd, message)
+
+        # ── Build payload ──────────────────────────────────────────────────
         relay_mode = nd.get("relay_mode", "webhook")
         nick = nd.get("server_nicknames", {}).get(str(message.guild.id))
         mc = nd.get("mention_control", {})
         content = sanitise_mentions(message.content or "", mc)
 
+        # Anonymous mode
+        is_anon = nd.get("anonymous", False)
+        if is_anon:
+            anon_name = self._anon_name(nd, message.author.id)
+            avatar = self._anon_avatar(message.author.id)
+            uname = anon_name
+        else:
+            avatar = self._avatar(message, nd.get("image_mode", "user"), nd.get("custom_icon"))
+            uname = self._name(message, nd.get("name_mode", "both"), nd.get("custom_name"), nick)
+
+        # User vanity colour (for embed mode)
+        user_colour = nd.get("user_colours", {}).get(str(message.author.id))
+
         # Reply context
         if nd.get("sync_replies") and message.reference and message.reference.message_id:
             try:
                 ref = message.reference.cached_message or await message.channel.fetch_message(message.reference.message_id)
+                ref_name = self._anon_name(nd, ref.author.id) if is_anon else ref.author.display_name
                 preview = truncate(ref.content, 100) if ref.content else "*[attachment]*"
-                content = f"> **↩ {ref.author.display_name}:** {preview}\n{content}"
+                content = f"> **↩ {ref_name}:** {preview}\n{content}"
             except: content = f"> ↩ *[reply]*\n{content}"
 
         # Stickers
@@ -2117,17 +3002,22 @@ class Wormhole(commands.Cog):
         if nd.get("forward_embeds") and message.embeds:
             extra_embeds = [e for e in message.embeds if e.type == "rich"]
 
-        avatar = self._avatar(message, nd.get("image_mode", "user"), nd.get("custom_icon"))
-        uname = self._name(message, nd.get("name_mode", "both"), nd.get("custom_name"), nick)
-
-        # Relay to channels
+        # ── Relay to channels ──────────────────────────────────────────────
         mapping: Dict[int, int] = {}
-        for ch_id in nd["channels"]:
+        # Build target list: own channels + bridge_to networks' channels
+        relay_targets = [cid for cid in nd["channels"] if cid != eff_ch]
+        for bridge_net in nd.get("bridge_to", []):
+            bd = nets.get(bridge_net)
+            if bd and not bd.get("frozen"):
+                relay_targets.extend(bd.get("channels", []))
+
+        for ch_id in relay_targets:
             if ch_id == eff_ch: continue
             ch = self.bot.get_channel(ch_id)
             if not ch: continue
             ch_mode = self._get_override(nd, ch_id, "relay_mode") or relay_mode
             try:
+                sent_msg = None
                 if ch_mode == "webhook":
                     try:
                         wh = await self._wh(ch)
@@ -2136,10 +3026,9 @@ class Wormhole(commands.Cog):
                             try: files.append(await a.to_file())
                             except: pass
                         send_content = content if content else None
-                        # Ensure we have something to send
                         if not send_content and not files and not extra_embeds:
                             send_content = "*[empty message]*"
-                        sent = await wh.send(
+                        sent_msg = await wh.send(
                             content=send_content,
                             username=truncate(uname, 80),
                             avatar_url=avatar,
@@ -2147,9 +3036,8 @@ class Wormhole(commands.Cog):
                             embeds=extra_embeds or discord.utils.MISSING,
                             wait=True,
                         )
-                        mapping[ch_id] = sent.id
+                        mapping[ch_id] = sent_msg.id
                     except (discord.NotFound, discord.InvalidData):
-                        # Webhook was deleted — refresh cache and retry once
                         try:
                             wh = await self._wh(ch, force_refresh=True)
                             files2 = []
@@ -2159,7 +3047,7 @@ class Wormhole(commands.Cog):
                             send_content = content if content else None
                             if not send_content and not files2 and not extra_embeds:
                                 send_content = "*[empty message]*"
-                            sent = await wh.send(
+                            sent_msg = await wh.send(
                                 content=send_content,
                                 username=truncate(uname, 80),
                                 avatar_url=avatar,
@@ -2167,41 +3055,46 @@ class Wormhole(commands.Cog):
                                 embeds=extra_embeds or discord.utils.MISSING,
                                 wait=True,
                             )
-                            mapping[ch_id] = sent.id
+                            mapping[ch_id] = sent_msg.id
                         except Exception:
-                            # Fall back to embed mode
                             log.warning("Webhook retry failed for %s, falling back to embed", ch_id)
                             em = build_relay_embed(message, nick, nd.get("colour"))
-                            sent = await ch.send(embeds=[em] + extra_embeds[:9])
-                            mapping[ch_id] = sent.id
+                            sent_msg = await ch.send(embeds=[em] + extra_embeds[:9])
+                            mapping[ch_id] = sent_msg.id
                     except discord.Forbidden:
-                        # No webhook perms — fall back to embed mode
                         log.warning("No webhook perms in %s, falling back to embed", ch_id)
                         em = build_relay_embed(message, nick, nd.get("colour"))
-                        sent = await ch.send(embeds=[em] + extra_embeds[:9])
-                        mapping[ch_id] = sent.id
+                        sent_msg = await ch.send(embeds=[em] + extra_embeds[:9])
+                        mapping[ch_id] = sent_msg.id
                 elif ch_mode == "embed":
-                    em = build_relay_embed(message, nick, nd.get("colour"))
-                    sent = await ch.send(embeds=[em] + extra_embeds[:9])
-                    mapping[ch_id] = sent.id
+                    em = build_relay_embed(message, nick, user_colour or nd.get("colour"))
+                    sent_msg = await ch.send(embeds=[em] + extra_embeds[:9])
+                    mapping[ch_id] = sent_msg.id
                 elif ch_mode == "compact":
                     g = nick or message.guild.name
+                    display = anon_name if is_anon else message.author.display_name
                     files = []
                     for a in message.attachments:
                         try: files.append(await a.to_file())
                         except: pass
-                    sent = await ch.send(content=compact_format(g, message.author.display_name, content), files=files or None)
-                    mapping[ch_id] = sent.id
+                    sent_msg = await ch.send(content=compact_format(g, display, content), files=files or None)
+                    mapping[ch_id] = sent_msg.id
+
+                # Ephemeral deletion
+                if sent_msg and nd.get("ephemeral_delay", 0) > 0:
+                    await self._schedule_ephemeral_delete(sent_msg, nd["ephemeral_delay"])
+
             except Exception as exc:
                 log.error("Relay fail ch=%s net=%s: %s", ch_id, net_name, exc, exc_info=True)
 
         if mapping:
             self.msg_map.add(net_name, message.id, mapping)
 
-        # Stats + profile
+        # Stats + profile + analytics
         async with self.config.networks() as ns:
             if net_name in ns: ns[net_name]["total_messages"] = ns[net_name].get("total_messages", 0) + 1
         await self._update_profile(net_name, message.author, message.guild.id)
+        await self._record_analytics(net_name, message.author.id)
 
         # DM relay
         await self._relay_to_dm_subs(net_name, nd, message)
