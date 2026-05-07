@@ -261,8 +261,10 @@ def build_relay_embed(
 
     em = discord.Embed(description=message.content or "*[no text]*", colour=colour, timestamp=message.created_at)
     em.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
-    footer_icon = message.guild.icon.url if message.guild.icon else discord.Embed.Empty
-    em.set_footer(text=f"🌐 {guild_label} • #{message.channel.name}", icon_url=footer_icon)
+    if message.guild.icon:
+        em.set_footer(text=f"🌐 {guild_label} • #{message.channel.name}", icon_url=message.guild.icon.url)
+    else:
+        em.set_footer(text=f"🌐 {guild_label} • #{message.channel.name}")
 
     if message.attachments:
         img_set = False
