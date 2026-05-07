@@ -23,10 +23,18 @@ from redbot.core.utils.chat_formatting import box, humanize_list, pagify
 from .converter import embed_to_container, embeds_to_layout, view_items_to_action_rows
 from .formatter import (
     CV2MenuPaginator,
+    EmbedHelpView,
     HelpPaginatorView,
-    build_bot_help_pages,
-    build_cog_help_page,
-    build_command_help_page,
+    gather_bot_help_data,
+    gather_cog_help_data,
+    gather_command_help_data,
+    build_bot_help_embeds,
+    build_command_help_embed,
+    build_cog_help_embed,
+    build_cv2_bot_help_pages,
+    build_cv2_command_help,
+    build_cv2_cog_help,
+    _make_category_container,
 )
 
 log = logging.getLogger("red.evecogs.newhelpmenu")
@@ -246,15 +254,18 @@ class NewHelpMenu(commands.Cog):
         log.info("NewHelpMenu: Restored original send methods")
 
     # ═══════════════════════════════════════════════════════════════
-    #  HELP SYSTEM
+    #  HELP SYSTEM — Embeds by default, CV2 when enabled
     # ═══════════════════════════════════════════════════════════════
 
-    async def _send_cv2_help(
+    async def _send_help(
         self,
         ctx: commands.Context,
         thing: Optional[str] = None,
     ):
-        """Send Components V2 help for the bot, a cog, or a command."""
+        """Send help for the bot, a cog, or a command.
+
+        Uses embeds by default. When CV2 is enabled, uses Components V2 containers.
+        """
         settings = await self.config.guild(ctx.guild).all()
         accent = settings["accent_color"]
         categories = settings["categories"]
@@ -263,71 +274,85 @@ class NewHelpMenu(commands.Cog):
         blacklisted_commands = settings["blacklisted_commands"]
         show_hidden = settings["show_hidden"]
         timeout = settings["help_timeout"]
+        use_cv2 = settings["enabled"]
+        destination = ctx.author if settings["help_in_dm"] else ctx.channel
 
         if thing is None:
-            # Full bot help
-            pages, select_options = await build_bot_help_pages(
-                ctx,
-                self.bot,
+            # ── Full bot help ──
+            cat_data, total = await gather_bot_help_data(
+                ctx, self.bot,
                 categories=categories,
                 category_emojis=category_emojis,
-                accent_color=accent,
                 show_hidden=show_hidden,
                 blacklisted_cogs=blacklisted_cogs,
                 blacklisted_commands=blacklisted_commands,
             )
 
-            view = HelpPaginatorView(
-                pages,
-                author_id=ctx.author.id,
-                timeout=float(timeout),
-                category_options=select_options,
-            )
-
-            destination = ctx.author if settings["help_in_dm"] else ctx.channel
-            msg = await destination.send(view=view)
-            view.message = msg
-            self._active_views[msg.id] = view
+            if use_cv2:
+                pages, select_opts = build_cv2_bot_help_pages(
+                    ctx, self.bot, cat_data, total, accent_color=accent
+                )
+                view = HelpPaginatorView(
+                    pages, author_id=ctx.author.id,
+                    timeout=float(timeout), category_options=select_opts,
+                )
+                msg = await destination.send(view=view)
+                view.message = msg
+                self._active_views[msg.id] = view
+            else:
+                embeds, select_opts = build_bot_help_embeds(
+                    ctx, self.bot, cat_data, total, accent_color=accent
+                )
+                if len(embeds) == 1:
+                    msg = await destination.send(embed=embeds[0])
+                else:
+                    view = EmbedHelpView(
+                        embeds, author_id=ctx.author.id,
+                        timeout=float(timeout), category_options=select_opts,
+                    )
+                    msg = await destination.send(embed=embeds[0], view=view)
+                    view.message = msg
 
         else:
-            # Try to find a command first, then a cog
+            # ── Specific thing ──
             cmd = self.bot.get_command(thing)
             if cmd:
-                components = await build_command_help_page(
-                    ctx, cmd, accent_color=accent
-                )
-                layout = ui.LayoutView()
-                for comp in components:
-                    layout.add_item(comp)
-
-                destination = ctx.author if settings["help_in_dm"] else ctx.channel
-                msg = await destination.send(view=layout)
-                self._active_views[msg.id] = layout
+                data = await gather_command_help_data(ctx, cmd)
+                if use_cv2:
+                    components = build_cv2_command_help(ctx, data, accent_color=accent)
+                    layout = ui.LayoutView()
+                    for comp in components:
+                        layout.add_item(comp)
+                    msg = await destination.send(view=layout)
+                    self._active_views[msg.id] = layout
+                else:
+                    embed = build_command_help_embed(ctx, data, accent_color=accent)
+                    await destination.send(embed=embed)
                 return
 
-            # Try cog
             cog = self.bot.get_cog(thing)
             if cog:
-                components = await build_cog_help_page(
-                    ctx, cog, accent_color=accent, show_hidden=show_hidden
-                )
-                layout = ui.LayoutView()
-                for comp in components:
-                    layout.add_item(comp)
-
-                destination = ctx.author if settings["help_in_dm"] else ctx.channel
-                msg = await destination.send(view=layout)
-                self._active_views[msg.id] = layout
+                cog_name, cog_doc, cmds = await gather_cog_help_data(ctx, cog, show_hidden=show_hidden)
+                if use_cv2:
+                    components = build_cv2_cog_help(ctx, cog_name, cog_doc, cmds, accent_color=accent)
+                    layout = ui.LayoutView()
+                    for comp in components:
+                        layout.add_item(comp)
+                    msg = await destination.send(view=layout)
+                    self._active_views[msg.id] = layout
+                else:
+                    embed = build_cog_help_embed(ctx, cog_name, cog_doc, cmds, accent_color=accent)
+                    await destination.send(embed=embed)
                 return
 
             # Try category
             for cat_name, cog_list in categories.items():
                 if cat_name.lower() == thing.lower():
                     all_cmds: List[Tuple[str, str]] = []
-                    for cog_name in cog_list:
-                        cog = self.bot.get_cog(cog_name)
-                        if cog:
-                            for c in sorted(cog.get_commands(), key=lambda x: x.name):
+                    for cog_name_str in cog_list:
+                        cog_obj = self.bot.get_cog(cog_name_str)
+                        if cog_obj:
+                            for c in sorted(cog_obj.get_commands(), key=lambda x: x.name):
                                 if c.hidden and not show_hidden:
                                     continue
                                 try:
@@ -336,32 +361,38 @@ class NewHelpMenu(commands.Cog):
                                 except Exception:
                                     continue
                                 short = c.short_doc or "No description"
-                                all_cmds.append(
-                                    (f"{ctx.clean_prefix}{c.qualified_name}", short)
-                                )
+                                all_cmds.append((f"{ctx.clean_prefix}{c.qualified_name}", short))
 
                     emoji = category_emojis.get(cat_name, "📂")
-                    from .formatter import _make_category_container
-
-                    container = _make_category_container(
-                        cat_name, all_cmds, accent_color=accent, emoji=emoji
-                    )
-                    layout = ui.LayoutView()
-                    layout.add_item(container)
-
-                    destination = ctx.author if settings["help_in_dm"] else ctx.channel
-                    msg = await destination.send(view=layout)
-                    self._active_views[msg.id] = layout
+                    if use_cv2:
+                        container = _make_category_container(cat_name, all_cmds, accent_color=accent, emoji=emoji)
+                        layout = ui.LayoutView()
+                        layout.add_item(container)
+                        msg = await destination.send(view=layout)
+                        self._active_views[msg.id] = layout
+                    else:
+                        embed = discord.Embed(
+                            title=f"{emoji} {cat_name}",
+                            color=discord.Colour(accent),
+                        )
+                        for cmd_name, short in all_cmds:
+                            embed.add_field(name=cmd_name, value=short[:100], inline=True)
+                        await destination.send(embed=embed)
                     return
 
             # Nothing found
-            layout = ui.LayoutView()
-            container = ui.Container(accent_colour=discord.Colour(0xED4245))
-            container.add_item(
-                ui.TextDisplay(f"❌ No command, cog, or category named **{thing}** found.")
-            )
-            layout.add_item(container)
-            await ctx.send(view=layout)
+            if use_cv2:
+                layout = ui.LayoutView()
+                container = ui.Container(accent_colour=discord.Colour(0xED4245))
+                container.add_item(ui.TextDisplay(f"❌ No command, cog, or category named **{thing}** found."))
+                layout.add_item(container)
+                await ctx.send(view=layout)
+            else:
+                embed = discord.Embed(
+                    description=f"❌ No command, cog, or category named **{thing}** found.",
+                    color=discord.Colour(0xED4245),
+                )
+                await ctx.send(embed=embed)
 
     # ═══════════════════════════════════════════════════════════════
     #  LISTENERS
@@ -396,20 +427,18 @@ class NewHelpMenu(commands.Cog):
     @commands.command(name="help")
     async def _help_command(self, ctx: commands.Context, *, thing: str = None):
         """Shows help for the bot, a command, a cog, or a category."""
-        # Always use CV2 help in guilds — this cog IS the help replacement.
-        # The "enabled" toggle only controls global embed conversion.
         if ctx.guild:
             try:
-                await self._send_cv2_help(ctx, thing)
+                await self._send_help(ctx, thing)
                 return
             except Exception as e:
-                log.warning(f"CV2 help failed, using text fallback: {e}")
+                log.exception(f"Help menu failed, using text fallback: {e}")
 
         # Fallback for DMs or on error — paginate to stay under 2000 chars
         if thing is None:
             prefix = ctx.clean_prefix
             header = f"**{ctx.bot.user.display_name} — Help**\nUse `{prefix}help <command>` for details.\n"
-            pages: List[str] = []
+            chunks: List[str] = []
             current = header
             cog_names = sorted(ctx.bot.cogs.keys())
             for cog_name in cog_names:
@@ -419,14 +448,14 @@ class NewHelpMenu(commands.Cog):
                     cmd_names = ", ".join(f"`{c.name}`" for c in sorted(cmds, key=lambda c: c.name))
                     line = f"**{cog_name}** — {cmd_names}\n"
                     if len(current) + len(line) > 1900:
-                        pages.append(current)
+                        chunks.append(current)
                         current = line
                     else:
                         current += line
             if current:
-                pages.append(current)
-            for page in pages:
-                await ctx.send(page)
+                chunks.append(current)
+            for chunk in chunks:
+                await ctx.send(chunk)
         else:
             cmd = ctx.bot.get_command(thing)
             if cmd:
@@ -438,11 +467,11 @@ class NewHelpMenu(commands.Cog):
                     text += f"\n\n**Aliases:** {', '.join(cmd.aliases)}"
                 await ctx.send(text)
             else:
-                cog = ctx.bot.get_cog(thing)
-                if cog:
+                cog_obj = ctx.bot.get_cog(thing)
+                if cog_obj:
                     prefix = ctx.clean_prefix
-                    lines = [f"**{cog.qualified_name}**\n{cog.help or cog.__doc__ or 'No description.'}\n"]
-                    for c in sorted(cog.get_commands(), key=lambda c: c.name):
+                    lines = [f"**{cog_obj.qualified_name}**\n{cog_obj.help or cog_obj.__doc__ or 'No description.'}\n"]
+                    for c in sorted(cog_obj.get_commands(), key=lambda c: c.name):
                         if not c.hidden:
                             lines.append(f"`{prefix}{c.qualified_name}` — {c.short_doc or 'No description'}")
                     await ctx.send("\n".join(lines))
