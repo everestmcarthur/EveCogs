@@ -449,11 +449,17 @@ class HelpView(View):
         ft = _fmt(c.get("footer_text", ""), self.ctx)
         fi = c.get("footer_icon")
         if ft:
-            e.set_footer(text=ft, icon_url=fi or discord.Embed.Empty)
+            if fi:
+                e.set_footer(text=ft, icon_url=fi)
+            else:
+                e.set_footer(text=ft)
         if c.get("show_author"):
             an = _fmt(c.get("author_name", "{bot_name}"), self.ctx)
             ai = c.get("author_icon") or (self.ctx.me.display_avatar.url if self.ctx.me.display_avatar else None)
-            e.set_author(name=an, icon_url=ai or discord.Embed.Empty)
+            if ai:
+                e.set_author(name=an, icon_url=ai)
+            else:
+                e.set_author(name=an)
         return e
 
     def _home_embed(self) -> discord.Embed:
