@@ -343,10 +343,17 @@ def build_bot_help_embeds(
     if bot_avatar:
         overview.set_thumbnail(url=bot_avatar)
 
-    for cat_name, emoji, cmds in category_data:
-        cmd_names = ", ".join(f"`{name.split()[-1]}`" for name, _ in cmds[:15])
-        if len(cmds) > 15:
-            cmd_names += f" *+{len(cmds) - 15} more*"
+    for i, (cat_name, emoji, cmds) in enumerate(category_data):
+        if i >= 20:  # Discord max 25 fields; leave room
+            overview.add_field(
+                name="…and more",
+                value=f"Use the category select or `{prefix}help <category>` to see all.",
+                inline=False,
+            )
+            break
+        cmd_names = ", ".join(f"`{name.split()[-1]}`" for name, _ in cmds[:12])
+        if len(cmds) > 12:
+            cmd_names += f" *+{len(cmds) - 12} more*"
         overview.add_field(
             name=f"{emoji} {cat_name} ({len(cmds)})",
             value=cmd_names or "No commands",
@@ -529,9 +536,12 @@ class HelpPaginatorView(ui.LayoutView):
 
             close_row = ui.ActionRow()
             close_row.add_item(ui.Button(label="Close", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="help_close"))
-            if self.category_options and len(self.category_options) > 1:
-                close_row.add_item(ui.Select(placeholder="Jump to category…", options=self.category_options[:25], custom_id="help_category_select"))
             self.add_item(close_row)
+
+            if self.category_options and len(self.category_options) > 1:
+                select_row = ui.ActionRow()
+                select_row.add_item(ui.Select(placeholder="Jump to category…", options=self.category_options[:25], custom_id="help_category_select"))
+                self.add_item(select_row)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
