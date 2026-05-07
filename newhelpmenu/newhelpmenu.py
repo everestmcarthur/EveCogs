@@ -758,7 +758,7 @@ class _Formatter(commands.help.RedHelpFormatter):
     def __init__(self, cog: "NewHelpMenu"):
         self.cog = cog
 
-    async def format_bot_help(self, ctx, mapping, **kw):
+    async def format_bot_help(self, ctx, **kw):
         await self.cog._send_help(ctx)
 
     async def format_cog_help(self, ctx, obj, **kw):
@@ -766,6 +766,20 @@ class _Formatter(commands.help.RedHelpFormatter):
 
     async def format_command_help(self, ctx, obj, **kw):
         await self.cog._send_cmd_help(ctx, obj)
+
+    # Red may also call send_help directly — override to route properly
+    async def send_help(self, ctx, help_for=None, *, from_help_command=False, help_settings=None, **kw):
+        if help_for is None:
+            return await self.format_bot_help(ctx)
+        if isinstance(help_for, str):
+            help_for = ctx.bot.get_cog(help_for) or ctx.bot.get_command(help_for)
+            if help_for is None:
+                await ctx.send("No command or category found.")
+                return
+        if isinstance(help_for, commands.Cog):
+            return await self.format_cog_help(ctx, help_for)
+        if isinstance(help_for, commands.Command):
+            return await self.format_command_help(ctx, help_for)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━ COG ━━━━━━━━━━━━━━━━━━━━━━━━
