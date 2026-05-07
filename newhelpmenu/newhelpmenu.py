@@ -121,9 +121,16 @@ class NewHelpMenu(commands.Cog):
         original_channel_send = discord.abc.Messageable.send
 
         cog_ref = self  # closure reference
+        _converting = set()  # recursion guard (task ids)
 
         async def _convert_and_send(original_fn, self_obj, content, kwargs):
             """Shared logic: convert embeds → CV2, call the original fn."""
+            # Recursion guard: Context.send calls super().send (Messageable.send)
+            # which we also patch. Use asyncio task id to detect re-entry.
+            task = id(asyncio.current_task())
+            if task in _converting:
+                return await original_fn(self_obj, content, **kwargs)
+            _converting.add(task)
             try:
                 # Resolve the guild from whatever object we're sending to
                 guild = None
@@ -209,6 +216,8 @@ class NewHelpMenu(commands.Cog):
             except Exception as e:
                 log.warning(f"CV2 conversion failed, falling back to original: {e}")
                 return await original_fn(self_obj, content, **kwargs)
+            finally:
+                _converting.discard(task)
 
         async def patched_ctx_send(ctx_self, content=None, **kwargs):
             """Wrapper around Context.send."""
@@ -393,19 +402,28 @@ class NewHelpMenu(commands.Cog):
                 await self._send_cv2_help(ctx, thing)
                 return
 
-        # Fallback for DMs or when CV2 is disabled
+        # Fallback for DMs or when CV2 is disabled — paginate to stay under 2000 chars
         if thing is None:
             prefix = ctx.clean_prefix
-            lines = [f"**{ctx.bot.user.display_name} — Help**\n"]
-            lines.append(f"Use `{prefix}help <command>` for details.\n")
+            header = f"**{ctx.bot.user.display_name} — Help**\nUse `{prefix}help <command>` for details.\n"
+            pages: List[str] = []
+            current = header
             cog_names = sorted(ctx.bot.cogs.keys())
             for cog_name in cog_names:
-                cog = ctx.bot.get_cog(cog_name)
-                cmds = [c for c in cog.get_commands() if not c.hidden]
+                cog_obj = ctx.bot.get_cog(cog_name)
+                cmds = [c for c in cog_obj.get_commands() if not c.hidden]
                 if cmds:
                     cmd_names = ", ".join(f"`{c.name}`" for c in sorted(cmds, key=lambda c: c.name))
-                    lines.append(f"**{cog_name}** — {cmd_names}")
-            await ctx.send("\n".join(lines))
+                    line = f"**{cog_name}** — {cmd_names}\n"
+                    if len(current) + len(line) > 1900:
+                        pages.append(current)
+                        current = line
+                    else:
+                        current += line
+            if current:
+                pages.append(current)
+            for page in pages:
+                await ctx.send(page)
         else:
             cmd = ctx.bot.get_command(thing)
             if cmd:
