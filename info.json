@@ -1,6 +1,8 @@
 {
     "author": ["everestmcarthur"],
-    "description": "EveCogs — a curated collection of advanced, professional-grade cogs for Red-DiscordBot.",
-    "install_msg": "Thank you for installing **EveCogs**! Browse available cogs with `[p]cog list` and install what you need.",
-    "short": "Advanced cogs for Red-DiscordBot"
+    "install_msg": "Welcome to **EveCogs**! Use `[p]cog list` to see available cogs.",
+    "name": "EveCogs",
+    "short": "A collection of advanced cogs for Red-DiscordBot.",
+    "description": "EveCogs is a premium cog repository featuring Wormhole — the ultimate cross-server relay system with DM relay, starboard, karma, auto-moderation, invites, portals, and 50+ commands.",
+    "type": "REPO"
 }
