@@ -13,7 +13,6 @@ Detection heuristics:
   7. Cross-channel spam     — Same message in multiple channels simultaneously.
   8. Cross-server activity  — Messages in different servers within impossible windows.
   9. Edit cadence            — Precise, consistent message edit timing.
-  10. Presence anomalies    — Sending messages while offline/invisible.
   11. Reaction sniping      — Adding reactions within milliseconds of a post.
   12. Formatting analysis   — Suspiciously clean structured output at inhuman speed.
   13. Token-snipe triggers  — Instantly responding to specific trigger words.
@@ -54,7 +53,7 @@ WEIGHT_BURST            = 10   # Rapid-fire messages
 WEIGHT_CROSS_CHANNEL    = 35   # Same message blasted across channels
 WEIGHT_CROSS_SERVER     = 30   # Active in multiple guilds simultaneously
 WEIGHT_EDIT_CADENCE     = 20   # Precise edit timing
-WEIGHT_PRESENCE_ANOMALY = 25   # Messaging while offline/invisible
+
 WEIGHT_REACTION_SNIPE   = 20   # Instant reactions
 WEIGHT_CLEAN_FORMAT     = 15   # Suspiciously clean output at speed
 WEIGHT_TOKEN_SNIPE      = 30   # Instant response to trigger words
@@ -124,7 +123,7 @@ class UserProfile:
         "user_id", "guild_id", "timestamps", "response_times_ms",
         "hour_buckets", "patterns", "bursts", "embed_strikes",
         "cross_channel_hits", "cross_server_hits",
-        "edit_delays_ms", "presence_anomalies", "fast_reactions",
+        "edit_delays_ms", "fast_reactions",
         "trigger_responses", "self_delete_intervals",
         "score", "last_scored", "last_message_ts", "flagged",
         "action_taken", "last_active",
@@ -142,7 +141,7 @@ class UserProfile:
         self.cross_channel_hits: int = 0            # Cross-channel spam events
         self.cross_server_hits: int = 0             # Cross-server simultaneous events
         self.edit_delays_ms: Deque[float] = deque(maxlen=50)  # Message edit delays
-        self.presence_anomalies: int = 0            # Msgs while offline/invisible
+
         self.fast_reactions: int = 0                # Reactions added inhumanly fast
         self.trigger_responses: int = 0             # Instant responses to trigger words
         self.self_delete_intervals: Deque[float] = deque(maxlen=50)  # Send→delete intervals
@@ -519,24 +518,6 @@ class SelfbotGuard(commands.Cog):
                 return score
         return 0.0
 
-    def _check_presence_anomaly(self, message: discord.Message, profile: UserProfile) -> float:
-        """
-        Heuristic 10: Presence anomaly.
-
-        If a user is sending messages but their Discord status is offline or
-        invisible, real clients always update presence. Selfbot libraries
-        (discord.py-self, etc.) often skip presence or leave it static.
-        """
-        member = message.author
-        if not isinstance(member, discord.Member):
-            return 0.0
-
-        # offline or invisible while sending messages = suspicious
-        if member.status in (discord.Status.offline, discord.Status.invisible):
-            profile.presence_anomalies += 1
-            if profile.presence_anomalies >= 3:
-                return WEIGHT_PRESENCE_ANOMALY * (profile.presence_anomalies / 3)
-        return 0.0
 
     def _check_clean_formatting(self, message: discord.Message, profile: UserProfile) -> float:
         """
@@ -678,11 +659,6 @@ class SelfbotGuard(commands.Cog):
                     reasons.append(f"Precise edit timing (variance {variance:.0f}ms) (+{s9:.0f})")
                     profile.score += s9
 
-        # Heuristic 10: Presence anomaly
-        s10 = self._check_presence_anomaly(message, profile)
-        if s10 > 0:
-            reasons.append(f"Sending messages while offline/invisible ({profile.presence_anomalies}x) (+{s10:.0f})")
-            profile.score += s10
 
         # Heuristic 11: Fast reactions (scored in on_reaction_add listener)
         if profile.fast_reactions >= MIN_FAST_REACTIONS:
@@ -1354,7 +1330,6 @@ class SelfbotGuard(commands.Cog):
         embed.add_field(name="Cross-Channel Hits", value=str(profile.cross_channel_hits), inline=True)
         embed.add_field(name="Cross-Server Hits", value=str(profile.cross_server_hits), inline=True)
         embed.add_field(name="Edit Cadence Samples", value=str(len(profile.edit_delays_ms)), inline=True)
-        embed.add_field(name="Presence Anomalies", value=str(profile.presence_anomalies), inline=True)
         embed.add_field(name="Fast Reactions", value=str(profile.fast_reactions), inline=True)
         embed.add_field(name="Trigger Responses", value=str(profile.trigger_responses), inline=True)
         embed.add_field(name="Self-Deletes Tracked", value=str(len(profile.self_delete_intervals)), inline=True)
