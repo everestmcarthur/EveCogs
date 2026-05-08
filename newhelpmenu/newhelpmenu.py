@@ -364,19 +364,25 @@ class NewHelpMenu(commands.Cog):
                                 all_cmds.append((f"{ctx.clean_prefix}{c.qualified_name}", short))
 
                     emoji = category_emojis.get(cat_name, "📂")
+                    prefix = ctx.clean_prefix
                     if use_cv2:
-                        container = _make_category_container(cat_name, all_cmds, accent_color=accent, emoji=emoji)
+                        container = _make_category_container(cat_name, all_cmds, accent_color=accent, emoji=emoji, prefix=prefix)
                         layout = ui.LayoutView()
                         layout.add_item(container)
                         msg = await destination.send(view=layout)
                         self._active_views[msg.id] = layout
                     else:
-                        embed = discord.Embed(
-                            title=f"{emoji} {cat_name}",
-                            color=discord.Colour(accent),
-                        )
+                        bot_avatar = self.bot.user.display_avatar.url if self.bot.user else None
+                        embed = discord.Embed(color=discord.Colour(accent))
+                        embed.set_author(name=f"{emoji}  {cat_name}", icon_url=bot_avatar)
+                        cmd_lines = []
                         for cmd_name, short in all_cmds:
-                            embed.add_field(name=cmd_name, value=short[:100], inline=True)
+                            display = cmd_name
+                            if display.startswith(prefix):
+                                display = display[len(prefix):]
+                            cmd_lines.append(f"**`{display}`** · {short[:60]}")
+                        embed.description = "\n".join(cmd_lines)
+                        embed.set_footer(text=f"{prefix}help <command> for details")
                         await destination.send(embed=embed)
                     return
 
