@@ -2,11 +2,11 @@
     "author": [
         "everestmcarthur"
     ],
-    "install_msg": "Thanks for installing **SelfbotGuard v1.0.0** \u2014 advanced selfbot detection & punishment.\n\nGet started: `[p]sbguard enable` to turn it on, `[p]sbguard action <action>` to set punishment.\n\nDetection heuristics: rich-embed abuse, inhuman response speed, timing precision analysis, 24/7 activity profiling, and automated command-response pattern matching.\n\nCog is *disabled by default* \u2014 enable per-server.",
+    "install_msg": "Thanks for installing **SelfbotGuard v1.2.0** \u2014 14-layer selfbot detection & punishment.\n\nGet started: `[p]sbguard enable` to turn it on, `[p]sbguard action <action>` to set punishment.\n\nDetection: rich-embed abuse, inhuman response speed, timing precision, 24/7 activity, pattern matching, burst detection, cross-channel spam, cross-server simultaneous activity, edit cadence, presence anomalies, reaction sniping, formatting analysis, trigger-word sniping, and self-delete patterns.\n\nCog is *disabled by default* \u2014 enable per-server.",
     "name": "SelfbotGuard",
     "disabled": false,
     "short": "Advanced selfbot detection with configurable per-server punishments.",
-    "description": "SelfbotGuard v1.0.0 detects Discord selfbots using multiple heuristic layers: rich-embed abuse detection (user accounts cannot send rich embeds via the client), inhuman response-time analysis, message-timing precision scoring, 24/7 activity profiling, automated command-response pattern matching, and rapid-fire burst detection. Each heuristic contributes to a cumulative suspicion score per user. When the score exceeds a configurable threshold, the bot takes action: warn, mute/timeout, kick, ban, or log-only. Admins can configure sensitivity, exempt roles/users, set a dedicated log channel, and review flagged users. Cog is disabled by default per-server.",
+    "description": "SelfbotGuard v1.2.0 detects Discord selfbots using 14 heuristic layers: rich-embed abuse, inhuman response-time analysis, message-timing precision, 24/7 activity profiling, automated command-response patterns, rapid-fire burst detection, cross-channel spam (same message blasted across channels), cross-server simultaneous activity (messages in different servers within impossible windows), edit cadence analysis, presence anomalies (messaging while offline/invisible), reaction speed sniping, suspiciously clean formatting at speed, trigger-word sniping (giveaway/nitro/etc.), and self-delete patterns. Each heuristic contributes to a cumulative suspicion score per user. When the score exceeds a configurable threshold, the bot takes action: warn, mute/timeout, kick, ban, or log-only. No exceptions.",
     "tags": [
         "selfbot",
         "detection",

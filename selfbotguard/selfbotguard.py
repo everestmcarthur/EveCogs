@@ -10,6 +10,14 @@ Detection heuristics:
   4. Activity profiling     — 24/7 activity across all hours without gaps.
   5. Pattern matching       — Automated prefix→response command patterns.
   6. Burst detection        — Rapid-fire messages exceeding human typing speed.
+  7. Cross-channel spam     — Same message in multiple channels simultaneously.
+  8. Cross-server activity  — Messages in different servers within impossible windows.
+  9. Edit cadence            — Precise, consistent message edit timing.
+  10. Presence anomalies    — Sending messages while offline/invisible.
+  11. Reaction sniping      — Adding reactions within milliseconds of a post.
+  12. Formatting analysis   — Suspiciously clean structured output at inhuman speed.
+  13. Token-snipe triggers  — Instantly responding to specific trigger words.
+  14. Self-delete patterns  — Send → wait exact N seconds → delete.
 
 Each heuristic contributes to a cumulative suspicion score. When the score
 exceeds the server's threshold, the configured action is taken.
@@ -43,6 +51,14 @@ WEIGHT_TIMING_PRECISION = 20   # Consistent intervals
 WEIGHT_ACTIVITY_247     = 25   # Active across all hour buckets
 WEIGHT_PATTERN_MATCH    = 15   # Command-response patterns
 WEIGHT_BURST            = 10   # Rapid-fire messages
+WEIGHT_CROSS_CHANNEL    = 35   # Same message blasted across channels
+WEIGHT_CROSS_SERVER     = 30   # Active in multiple guilds simultaneously
+WEIGHT_EDIT_CADENCE     = 20   # Precise edit timing
+WEIGHT_PRESENCE_ANOMALY = 25   # Messaging while offline/invisible
+WEIGHT_REACTION_SNIPE   = 20   # Instant reactions
+WEIGHT_CLEAN_FORMAT     = 15   # Suspiciously clean output at speed
+WEIGHT_TOKEN_SNIPE      = 30   # Instant response to trigger words
+WEIGHT_SELF_DELETE      = 25   # Timed self-deletion patterns
 
 # Thresholds for heuristics
 RESPONSE_TIME_FLOOR_MS  = 300   # Faster than this = suspicious (ms)
@@ -53,6 +69,26 @@ ACTIVITY_HOUR_COVERAGE  = 20    # Out of 24 hours — if active in this many, su
 MIN_MESSAGES_FOR_TIMING = 10    # Need this many messages before timing analysis
 MIN_RESPONSES_FOR_SPEED = 5     # Need this many fast responses before flagging
 PATTERN_REPEAT_THRESHOLD= 5    # Same prefix→response pattern this many times
+CROSS_CHAN_WINDOW_SECS  = 5     # Window for cross-channel spam detection
+CROSS_CHAN_MIN_CHANNELS = 3     # Same msg in this many channels = selfbot
+CROSS_CHAN_SIMILARITY   = 0.85  # Content similarity threshold (0-1)
+CROSS_SERVER_WINDOW_SECS= 2     # Window for cross-server simultaneous activity
+CROSS_SERVER_MIN_HITS   = 3     # This many near-simultaneous events to flag
+MAX_CROSS_CHAN_HISTORY  = 50    # Rolling window of cross-channel entries per user
+EDIT_VARIANCE_CEIL_MS   = 100   # Edit delay variance below this = suspicious
+MIN_EDITS_FOR_CADENCE   = 5     # Need this many edits before analysing cadence
+REACTION_SPEED_CEIL_MS  = 500   # Reaction faster than this = suspicious
+MIN_FAST_REACTIONS      = 3     # This many fast reactions before flagging
+CLEAN_FORMAT_MIN_LEN    = 200   # Minimum message length for formatting analysis
+CLEAN_FORMAT_SPEED_CEIL = 5.0   # Seconds — structured msg this fast = suspicious
+TRIGGER_WORDS           = {     # Common selfbot trigger words (lowercase)
+    "giveaway", "nitro", "drop", "free", "claim", "airdrop",
+    "discord.gift", "discord.gg", "dank memer", "pokétwo",
+}
+TRIGGER_RESPONSE_CEIL_MS= 1000  # Respond to trigger within this = suspicious
+MIN_TRIGGER_HITS        = 3     # This many trigger-responses before flagging
+SELF_DELETE_VARIANCE_MS = 200   # Variance of send→delete intervals below this = bot
+MIN_SELF_DELETES        = 3     # This many patterned self-deletes before flagging
 
 # Data retention
 MAX_TIMESTAMPS_PER_USER = 200   # Rolling window of message timestamps
@@ -87,6 +123,9 @@ class UserProfile:
     __slots__ = (
         "user_id", "guild_id", "timestamps", "response_times_ms",
         "hour_buckets", "patterns", "bursts", "embed_strikes",
+        "cross_channel_hits", "cross_server_hits",
+        "edit_delays_ms", "presence_anomalies", "fast_reactions",
+        "trigger_responses", "self_delete_intervals",
         "score", "last_scored", "last_message_ts", "flagged",
         "action_taken", "last_active",
     )
@@ -100,6 +139,13 @@ class UserProfile:
         self.patterns: Dict[str, int] = defaultdict(int)  # "prefix→response" counters
         self.bursts: int = 0                        # Number of burst events detected
         self.embed_strikes: int = 0                 # Rich embeds sent by non-bot user
+        self.cross_channel_hits: int = 0            # Cross-channel spam events
+        self.cross_server_hits: int = 0             # Cross-server simultaneous events
+        self.edit_delays_ms: Deque[float] = deque(maxlen=50)  # Message edit delays
+        self.presence_anomalies: int = 0            # Msgs while offline/invisible
+        self.fast_reactions: int = 0                # Reactions added inhumanly fast
+        self.trigger_responses: int = 0             # Instant responses to trigger words
+        self.self_delete_intervals: Deque[float] = deque(maxlen=50)  # Send→delete intervals
         self.score: float = 0.0
         self.last_scored: float = 0.0               # time.time() of last score calc
         self.last_message_ts: float = 0.0           # Timestamp of user's last message
@@ -128,7 +174,7 @@ class UserProfile:
 class SelfbotGuard(commands.Cog):
     """Advanced selfbot detection with per-server configurable punishments."""
 
-    __version__ = "1.0.0"
+    __version__ = "1.2.0"
     __author__ = ["everestmcarthur"]
 
     def __init__(self, bot: Red):
@@ -156,6 +202,25 @@ class SelfbotGuard(commands.Cog):
         # Recent messages cache for response-time analysis
         # guild_id -> channel_id -> (author_id, timestamp, content_prefix)
         self._recent_messages: Dict[int, Dict[int, Tuple[int, float, str]]] = defaultdict(dict)
+
+        # Cross-channel tracking: guild_id -> user_id -> deque of (channel_id, timestamp, content_hash)
+        self._cross_channel: Dict[int, Dict[int, Deque[Tuple[int, float, str]]]] = defaultdict(
+            lambda: defaultdict(lambda: deque(maxlen=MAX_CROSS_CHAN_HISTORY))
+        )
+
+        # Cross-server tracking (GLOBAL, not per-guild):
+        # user_id -> deque of (guild_id, timestamp)
+        self._global_activity: Dict[int, Deque[Tuple[int, float]]] = defaultdict(
+            lambda: deque(maxlen=100)
+        )
+
+        # Message send times for self-delete correlation:
+        # message_id -> (author_id, guild_id, send_timestamp)
+        self._message_send_times: Dict[int, Tuple[int, int, float]] = {}
+
+        # Recent trigger messages per channel for token-snipe detection:
+        # channel_id -> (trigger_word, timestamp)
+        self._trigger_cache: Dict[int, Tuple[str, float]] = {}
 
         # Background task
         self._prune_task: Optional[asyncio.Task] = None
@@ -352,6 +417,201 @@ class SelfbotGuard(commands.Cog):
             return WEIGHT_BURST * profile.bursts
         return 0.0
 
+    @staticmethod
+    def _content_hash(text: str) -> str:
+        """Normalise and hash message content for cross-channel comparison."""
+        # Strip whitespace, lower-case, remove common prefixes like bot commands
+        normalised = text.strip().lower()
+        # Use first 100 chars as the fingerprint — enough to detect copy-paste
+        return normalised[:100]
+
+    @staticmethod
+    def _content_similar(a: str, b: str) -> float:
+        """Quick similarity ratio between two content hashes (0.0 – 1.0)."""
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+        # Character-level Jaccard similarity (fast, no imports)
+        set_a, set_b = set(a), set(b)
+        intersection = len(set_a & set_b)
+        union = len(set_a | set_b)
+        return intersection / union if union else 0.0
+
+    def _check_cross_channel(self, message: discord.Message, profile: UserProfile) -> float:
+        """
+        Heuristic 7: Cross-channel spam.
+
+        Selfbots blast the same (or near-identical) message across multiple
+        channels simultaneously. A human can't paste the same message into
+        3+ channels within 5 seconds. No exceptions.
+        """
+        content = (message.content or "").strip()
+        if len(content) < 5:
+            return 0.0
+
+        guild_id = message.guild.id
+        user_id = message.author.id
+        channel_id = message.channel.id
+        now = time.time()
+        content_fp = self._content_hash(content)
+
+        # Record this message
+        user_cache = self._cross_channel[guild_id][user_id]
+        user_cache.append((channel_id, now, content_fp))
+
+        # Look back within the time window for similar content in OTHER channels
+        cutoff = now - CROSS_CHAN_WINDOW_SECS
+        channels_hit: Set[int] = set()
+        for ch_id, ts, fp in user_cache:
+            if ts >= cutoff and ch_id != channel_id:
+                if self._content_similar(content_fp, fp) >= CROSS_CHAN_SIMILARITY:
+                    channels_hit.add(ch_id)
+
+        if len(channels_hit) >= (CROSS_CHAN_MIN_CHANNELS - 1):  # -1 because current channel counts
+            profile.cross_channel_hits += 1
+            channel_count = len(channels_hit) + 1  # Include current channel
+            # Scale by how many channels — 3 channels is baseline, more = worse
+            multiplier = channel_count / CROSS_CHAN_MIN_CHANNELS
+            score = WEIGHT_CROSS_CHANNEL * multiplier * profile.cross_channel_hits
+            log.debug(
+                "Cross-channel spam: user %s in guild %s — %d channels in %ds (hit #%d)",
+                user_id, guild_id, channel_count, CROSS_CHAN_WINDOW_SECS,
+                profile.cross_channel_hits,
+            )
+            return score
+        return 0.0
+
+    def _check_cross_server(self, message: discord.Message, profile: UserProfile) -> float:
+        """
+        Heuristic 8: Cross-server simultaneous activity.
+
+        The bot tracks user activity GLOBALLY across all guilds it monitors.
+        If the same user sends messages in different servers within <2 seconds,
+        repeatedly, that's physically impossible for a human (they'd need to
+        switch servers, find a channel, type, and send). No exceptions.
+        """
+        user_id = message.author.id
+        guild_id = message.guild.id
+        now = time.time()
+
+        # Record to global tracker
+        self._global_activity[user_id].append((guild_id, now))
+
+        # Check for messages in OTHER guilds within the window
+        cutoff = now - CROSS_SERVER_WINDOW_SECS
+        other_guilds: Set[int] = set()
+        for g_id, ts in self._global_activity[user_id]:
+            if ts >= cutoff and g_id != guild_id:
+                other_guilds.add(g_id)
+
+        if other_guilds:
+            profile.cross_server_hits += 1
+            if profile.cross_server_hits >= CROSS_SERVER_MIN_HITS:
+                server_count = len(other_guilds) + 1  # Include current
+                multiplier = server_count  # More servers = more suspicious
+                score = WEIGHT_CROSS_SERVER * multiplier * (profile.cross_server_hits / CROSS_SERVER_MIN_HITS)
+                log.debug(
+                    "Cross-server activity: user %s — %d guilds within %ds (hit #%d)",
+                    user_id, server_count, CROSS_SERVER_WINDOW_SECS,
+                    profile.cross_server_hits,
+                )
+                return score
+        return 0.0
+
+    def _check_presence_anomaly(self, message: discord.Message, profile: UserProfile) -> float:
+        """
+        Heuristic 10: Presence anomaly.
+
+        If a user is sending messages but their Discord status is offline or
+        invisible, real clients always update presence. Selfbot libraries
+        (discord.py-self, etc.) often skip presence or leave it static.
+        """
+        member = message.author
+        if not isinstance(member, discord.Member):
+            return 0.0
+
+        # offline or invisible while sending messages = suspicious
+        if member.status in (discord.Status.offline, discord.Status.invisible):
+            profile.presence_anomalies += 1
+            if profile.presence_anomalies >= 3:
+                return WEIGHT_PRESENCE_ANOMALY * (profile.presence_anomalies / 3)
+        return 0.0
+
+    def _check_clean_formatting(self, message: discord.Message, profile: UserProfile) -> float:
+        """
+        Heuristic 12: Suspiciously clean formatted output at inhuman speed.
+
+        Long messages with perfect markdown tables, structured formatting, zero
+        typos, and code blocks that appear faster than any human could type.
+        """
+        content = message.content or ""
+        if len(content) < CLEAN_FORMAT_MIN_LEN:
+            return 0.0
+
+        # Check speed — how fast since last message?
+        now = time.time()
+        if profile.last_message_ts > 0:
+            gap = now - profile.last_message_ts
+            if gap > CLEAN_FORMAT_SPEED_CEIL:
+                return 0.0  # Took long enough to be human
+
+        # Score structural indicators
+        indicators = 0
+        if "```" in content:
+            indicators += 1  # Code blocks
+        if "| " in content and " |" in content:
+            indicators += 2  # Markdown tables
+        if content.count("\n") > 10:
+            indicators += 1  # Many lines
+        if "**" in content and "__" in content:
+            indicators += 1  # Mixed formatting
+
+        # Check for zero-typo heuristic: ratio of dictionary-like words
+        # (simplified: just check for consistent capitalisation patterns)
+        lines = content.split("\n")
+        if len(lines) > 5:
+            # Structured: many lines start with same prefix pattern (bullet, number, etc.)
+            prefixes = [line.strip()[:2] for line in lines if line.strip()]
+            from collections import Counter
+            prefix_counts = Counter(prefixes)
+            if prefix_counts and prefix_counts.most_common(1)[0][1] > len(lines) * 0.5:
+                indicators += 2  # Very structured repeated format
+
+        if indicators >= 3:
+            return WEIGHT_CLEAN_FORMAT * (indicators / 3)
+        return 0.0
+
+    def _check_trigger_snipe(self, message: discord.Message, profile: UserProfile) -> float:
+        """
+        Heuristic 13: Token-snipe / trigger-word response.
+
+        Selfbots monitor for specific trigger words (giveaway, nitro, free, etc.)
+        and respond instantly. We track when trigger words appear, then check if
+        this user responded impossibly fast.
+        """
+        content_lower = (message.content or "").lower()
+        channel_id = message.channel.id
+        now = time.time()
+
+        # First, check if THIS message contains trigger words (record for others)
+        for word in TRIGGER_WORDS:
+            if word in content_lower:
+                self._trigger_cache[channel_id] = (word, now)
+                break
+
+        # Then, check if user is responding to a recent trigger
+        cached = self._trigger_cache.get(channel_id)
+        if cached:
+            trigger_word, trigger_ts = cached
+            response_ms = (now - trigger_ts) * 1000
+            # Skip if this IS the trigger message itself
+            if response_ms > 50 and response_ms < TRIGGER_RESPONSE_CEIL_MS:
+                profile.trigger_responses += 1
+                if profile.trigger_responses >= MIN_TRIGGER_HITS:
+                    return WEIGHT_TOKEN_SNIPE * (profile.trigger_responses / MIN_TRIGGER_HITS)
+        return 0.0
+
     async def _compute_score(self, message: discord.Message, profile: UserProfile) -> Tuple[float, List[str]]:
         """Run all heuristics and return (total_score, list_of_triggered_reasons)."""
         reasons = []
@@ -394,6 +654,64 @@ class SelfbotGuard(commands.Cog):
         if s6 > 0:
             reasons.append(f"Rapid-fire burst ({BURST_MESSAGES}+ msgs in {BURST_WINDOW_SECS}s) (+{s6:.0f})")
             profile.score += s6
+
+        # Heuristic 7: Cross-channel spam
+        s7 = self._check_cross_channel(message, profile)
+        if s7 > 0:
+            reasons.append(f"Cross-channel spam ({CROSS_CHAN_MIN_CHANNELS}+ channels in {CROSS_CHAN_WINDOW_SECS}s) (+{s7:.0f})")
+            profile.score += s7
+
+        # Heuristic 8: Cross-server simultaneous activity
+        s8 = self._check_cross_server(message, profile)
+        if s8 > 0:
+            reasons.append(f"Cross-server simultaneous activity (<{CROSS_SERVER_WINDOW_SECS}s between guilds) (+{s8:.0f})")
+            profile.score += s8
+
+        # Heuristic 9: Edit cadence (scored in on_message_edit listener)
+        if len(profile.edit_delays_ms) >= MIN_EDITS_FOR_CADENCE:
+            delays = list(profile.edit_delays_ms)
+            mean_d = sum(delays) / len(delays)
+            if mean_d > 0:
+                variance = sum((d - mean_d) ** 2 for d in delays) / len(delays)
+                if variance < EDIT_VARIANCE_CEIL_MS:
+                    s9 = WEIGHT_EDIT_CADENCE * (1.0 + (1.0 - variance / EDIT_VARIANCE_CEIL_MS))
+                    reasons.append(f"Precise edit timing (variance {variance:.0f}ms) (+{s9:.0f})")
+                    profile.score += s9
+
+        # Heuristic 10: Presence anomaly
+        s10 = self._check_presence_anomaly(message, profile)
+        if s10 > 0:
+            reasons.append(f"Sending messages while offline/invisible ({profile.presence_anomalies}x) (+{s10:.0f})")
+            profile.score += s10
+
+        # Heuristic 11: Fast reactions (scored in on_reaction_add listener)
+        if profile.fast_reactions >= MIN_FAST_REACTIONS:
+            s11 = WEIGHT_REACTION_SNIPE * (profile.fast_reactions / MIN_FAST_REACTIONS)
+            reasons.append(f"Instant reactions (<{REACTION_SPEED_CEIL_MS}ms, {profile.fast_reactions}x) (+{s11:.0f})")
+            profile.score += s11
+
+        # Heuristic 12: Clean formatting at speed
+        s12 = self._check_clean_formatting(message, profile)
+        if s12 > 0:
+            reasons.append(f"Suspiciously clean structured output at speed (+{s12:.0f})")
+            profile.score += s12
+
+        # Heuristic 13: Trigger-word sniping
+        s13 = self._check_trigger_snipe(message, profile)
+        if s13 > 0:
+            reasons.append(f"Instant response to trigger words ({profile.trigger_responses}x) (+{s13:.0f})")
+            profile.score += s13
+
+        # Heuristic 14: Self-delete patterns (scored in on_message_delete listener)
+        if len(profile.self_delete_intervals) >= MIN_SELF_DELETES:
+            intervals = list(profile.self_delete_intervals)
+            mean_i = sum(intervals) / len(intervals)
+            if mean_i > 0:
+                variance_i = sum((i - mean_i) ** 2 for i in intervals) / len(intervals)
+                if variance_i < SELF_DELETE_VARIANCE_MS:
+                    s14 = WEIGHT_SELF_DELETE * (1.0 + (1.0 - variance_i / SELF_DELETE_VARIANCE_MS))
+                    reasons.append(f"Timed self-deletion pattern (variance {variance_i:.0f}ms) (+{s14:.0f})")
+                    profile.score += s14
 
         profile.last_scored = time.time()
         return profile.score, reasons
@@ -601,10 +919,20 @@ class SelfbotGuard(commands.Cog):
         profile.timestamps.append(now)
         profile.hour_buckets.add(datetime.now(timezone.utc).hour)
         profile.last_active = now
-        profile.last_message_ts = now
 
-        # Run heuristics
+        # Track message send time for self-delete correlation (heuristic 14)
+        self._message_send_times[message.id] = (member.id, guild.id, now)
+        # Prune old entries (keep last 1000)
+        if len(self._message_send_times) > 1000:
+            oldest_keys = sorted(self._message_send_times, key=lambda k: self._message_send_times[k][2])[:500]
+            for k in oldest_keys:
+                self._message_send_times.pop(k, None)
+
+        # Run heuristics (note: last_message_ts is used by _check_clean_formatting)
         score, reasons = await self._compute_score(message, profile)
+
+        # Update last_message_ts AFTER scoring (heuristic 12 needs the gap)
+        profile.last_message_ts = now
 
         # Check threshold
         threshold = conf["score_threshold"]
@@ -625,6 +953,77 @@ class SelfbotGuard(commands.Cog):
                 "SelfbotGuard flagged user %s in guild %s (score: %.0f, action: %s)",
                 member.id, guild.id, score, action_result,
             )
+
+    @commands.Cog.listener()
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        """Heuristic 9: Track edit timing cadence."""
+        if not after.guild or after.author.bot:
+            return
+        conf = await self.config.guild(after.guild).all()
+        if not conf["enabled"]:
+            return
+        member = after.author
+        if not isinstance(member, discord.Member):
+            return
+        if await self._is_exempt(member):
+            return
+
+        # Calculate edit delay
+        created_ts = before.created_at.timestamp()
+        edited_ts = after.edited_at.timestamp() if after.edited_at else time.time()
+        delay_ms = (edited_ts - created_ts) * 1000
+
+        profile = self._get_profile(after.guild.id, member.id)
+        profile.edit_delays_ms.append(delay_ms)
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction: discord.Reaction, user):
+        """Heuristic 11: Track reaction speed."""
+        if not reaction.message.guild or user.bot:
+            return
+        if not isinstance(user, discord.Member):
+            return
+        conf = await self.config.guild(reaction.message.guild).all()
+        if not conf["enabled"]:
+            return
+        if await self._is_exempt(user):
+            return
+
+        # How fast was the reaction added after the message was sent?
+        msg_ts = reaction.message.created_at.timestamp()
+        now = time.time()
+        delay_ms = (now - msg_ts) * 1000
+
+        if delay_ms < REACTION_SPEED_CEIL_MS:
+            profile = self._get_profile(reaction.message.guild.id, user.id)
+            profile.fast_reactions += 1
+            log.debug(
+                "Fast reaction from user %s in guild %s: %.0fms (count: %d)",
+                user.id, reaction.message.guild.id, delay_ms, profile.fast_reactions,
+            )
+
+    @commands.Cog.listener()
+    async def on_message_delete(self, message: discord.Message):
+        """Heuristic 14: Track self-deletion patterns."""
+        if not message.guild or message.author.bot:
+            return
+        if not isinstance(message.author, discord.Member):
+            return
+
+        conf = await self.config.guild(message.guild).all()
+        if not conf["enabled"]:
+            return
+        if await self._is_exempt(message.author):
+            return
+
+        # Check if this was tracked at send time
+        send_info = self._message_send_times.pop(message.id, None)
+        if send_info:
+            author_id, guild_id, send_ts = send_info
+            if author_id == message.author.id:
+                delete_delay_ms = (time.time() - send_ts) * 1000
+                profile = self._get_profile(guild_id, author_id)
+                profile.self_delete_intervals.append(delete_delay_ms)
 
     # ═════════════════════════════════════════════════════════
     # Commands — Admin configuration
@@ -952,6 +1351,13 @@ class SelfbotGuard(commands.Cog):
         embed.add_field(name="Fast Responses", value=str(len(profile.response_times_ms)), inline=True)
         embed.add_field(name="Burst Events", value=str(profile.bursts), inline=True)
         embed.add_field(name="Unique Patterns", value=str(len(profile.patterns)), inline=True)
+        embed.add_field(name="Cross-Channel Hits", value=str(profile.cross_channel_hits), inline=True)
+        embed.add_field(name="Cross-Server Hits", value=str(profile.cross_server_hits), inline=True)
+        embed.add_field(name="Edit Cadence Samples", value=str(len(profile.edit_delays_ms)), inline=True)
+        embed.add_field(name="Presence Anomalies", value=str(profile.presence_anomalies), inline=True)
+        embed.add_field(name="Fast Reactions", value=str(profile.fast_reactions), inline=True)
+        embed.add_field(name="Trigger Responses", value=str(profile.trigger_responses), inline=True)
+        embed.add_field(name="Self-Deletes Tracked", value=str(len(profile.self_delete_intervals)), inline=True)
 
         threshold = await self.config.guild(ctx.guild).score_threshold()
         bar_len = 20
@@ -983,6 +1389,8 @@ class SelfbotGuard(commands.Cog):
             del self._profiles[ctx.guild.id]
         if ctx.guild.id in self._recent_messages:
             del self._recent_messages[ctx.guild.id]
+        if ctx.guild.id in self._cross_channel:
+            del self._cross_channel[ctx.guild.id]
         await ctx.send("✅ All SelfbotGuard data for this server has been reset.")
 
     # ── Hybrid slash support ─────────────────────────────────
