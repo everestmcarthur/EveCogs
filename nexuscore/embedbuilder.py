@@ -455,6 +455,11 @@ class EmbedBuilderMixin:
         self.embed_config.register_guild(**EMBED_DEFAULTS_GUILD)
         self._scheduled_embed_tasks = {}
 
+    async def _scheduled_embed_loop(self):
+        """Background task: load and run scheduled embeds on startup."""
+        await self.bot.wait_until_ready()
+        await self._load_scheduled_embeds()
+
     async def _load_scheduled_embeds(self):
         """Load and schedule pending embed sends."""
         for guild in self.bot.guilds:
