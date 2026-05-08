@@ -341,8 +341,10 @@ class VoiceMeisterPanel(ui.View):
         cog, member, vc, owner_id = await _require_owner(interaction)
         if cog is None:
             return
+        overwrite = vc.overwrites_for(vc.guild.default_role)
+        overwrite.connect = False
         await vc.set_permissions(
-            vc.guild.default_role, connect=False,
+            vc.guild.default_role, overwrite=overwrite,
             reason=f"VoiceMeister: locked by {member}",
         )
         await interaction.response.send_message(
@@ -356,8 +358,10 @@ class VoiceMeisterPanel(ui.View):
         cog, member, vc, owner_id = await _require_owner(interaction)
         if cog is None:
             return
+        overwrite = vc.overwrites_for(vc.guild.default_role)
+        overwrite.connect = None
         await vc.set_permissions(
-            vc.guild.default_role, connect=None,
+            vc.guild.default_role, overwrite=overwrite,
             reason=f"VoiceMeister: unlocked by {member}",
         )
         await interaction.response.send_message(
@@ -371,8 +375,11 @@ class VoiceMeisterPanel(ui.View):
         cog, member, vc, owner_id = await _require_owner(interaction)
         if cog is None:
             return
+        overwrite = vc.overwrites_for(vc.guild.default_role)
+        overwrite.connect = False
+        overwrite.view_channel = False
         await vc.set_permissions(
-            vc.guild.default_role, connect=False, view_channel=False,
+            vc.guild.default_role, overwrite=overwrite,
             reason=f"VoiceMeister: ghosted by {member}",
         )
         await interaction.response.send_message(
@@ -386,8 +393,11 @@ class VoiceMeisterPanel(ui.View):
         cog, member, vc, owner_id = await _require_owner(interaction)
         if cog is None:
             return
+        overwrite = vc.overwrites_for(vc.guild.default_role)
+        overwrite.connect = None
+        overwrite.view_channel = None
         await vc.set_permissions(
-            vc.guild.default_role, connect=None, view_channel=None,
+            vc.guild.default_role, overwrite=overwrite,
             reason=f"VoiceMeister: revealed by {member}",
         )
         await interaction.response.send_message(
@@ -401,8 +411,10 @@ class VoiceMeisterPanel(ui.View):
         cog, member, vc, owner_id = await _require_owner(interaction)
         if cog is None:
             return
+        overwrite = vc.overwrites_for(vc.guild.default_role)
+        overwrite.view_channel = False
         await vc.set_permissions(
-            vc.guild.default_role, view_channel=False,
+            vc.guild.default_role, overwrite=overwrite,
             reason=f"VoiceMeister: hidden by {member}",
         )
         await interaction.response.send_message(
@@ -462,8 +474,10 @@ class VoiceMeisterPanel(ui.View):
         cog, member, vc, owner_id = await _require_owner(interaction)
         if cog is None:
             return
+        overwrite = vc.overwrites_for(vc.guild.default_role)
+        overwrite.view_channel = None
         await vc.set_permissions(
-            vc.guild.default_role, view_channel=None,
+            vc.guild.default_role, overwrite=overwrite,
             reason=f"VoiceMeister: unhidden by {member}",
         )
         await interaction.response.send_message(

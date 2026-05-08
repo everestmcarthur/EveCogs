@@ -7,9 +7,8 @@ name templates, game detection, logging, blacklist/whitelist, cooldowns.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import time
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
 import discord
 from redbot.core import Config, commands, checks
@@ -64,11 +63,8 @@ class VoiceMeister(commands.Cog):
         self.bot.add_view(self._panel_view)
         await self._load_all_guilds()
         self._bg_tasks.append(asyncio.create_task(self._cleanup_loop()))
-        if any(
-            (await self.config.guild_from_id(gid).auto_rename_game())
-            for gid in [g.id for g in self.bot.guilds]
-        ):
-            self._bg_tasks.append(asyncio.create_task(self._game_rename_loop()))
+        # Always start the game rename loop — it checks per-guild config each cycle
+        self._bg_tasks.append(asyncio.create_task(self._game_rename_loop()))
 
     async def cog_unload(self):
         for task in self._bg_tasks:
@@ -97,14 +93,13 @@ class VoiceMeister(commands.Cog):
                 gid = channel.guild.id
                 guild_map.setdefault(gid, {})[str(ch_id)] = owner_id
 
-        # Also handle guilds that might have had all channels removed
+        # Clear guilds that no longer have temp channels
         all_guilds = await self.config.all_guilds()
         for gid in all_guilds:
             if gid not in guild_map:
                 await self.config.guild_from_id(gid).temp_channels.set({})
-            else:
-                await self.config.guild_from_id(gid).temp_channels.set(guild_map[gid])
 
+        # Save guilds that have temp channels
         for gid, data in guild_map.items():
             await self.config.guild_from_id(gid).temp_channels.set(data)
 
@@ -965,7 +960,9 @@ class VoiceMeister(commands.Cog):
         vc, _ = await self._get_user_vc(ctx)
         if not vc:
             return
-        await vc.set_permissions(ctx.guild.default_role, connect=False,
+        overwrite = vc.overwrites_for(ctx.guild.default_role)
+        overwrite.connect = False
+        await vc.set_permissions(ctx.guild.default_role, overwrite=overwrite,
                                  reason=f"VoiceMeister: locked by {ctx.author}")
         await ctx.send(embed=ok_embed("Channel **locked** 🔒."))
         await self._log_action(ctx.guild, "🔒 Locked", member=ctx.author, channel=vc)
@@ -976,7 +973,9 @@ class VoiceMeister(commands.Cog):
         vc, _ = await self._get_user_vc(ctx)
         if not vc:
             return
-        await vc.set_permissions(ctx.guild.default_role, connect=None,
+        overwrite = vc.overwrites_for(ctx.guild.default_role)
+        overwrite.connect = None
+        await vc.set_permissions(ctx.guild.default_role, overwrite=overwrite,
                                  reason=f"VoiceMeister: unlocked by {ctx.author}")
         await ctx.send(embed=ok_embed("Channel **unlocked** 🔓."))
         await self._log_action(ctx.guild, "🔓 Unlocked", member=ctx.author, channel=vc)
@@ -987,7 +986,9 @@ class VoiceMeister(commands.Cog):
         vc, _ = await self._get_user_vc(ctx)
         if not vc:
             return
-        await vc.set_permissions(ctx.guild.default_role, view_channel=False,
+        overwrite = vc.overwrites_for(ctx.guild.default_role)
+        overwrite.view_channel = False
+        await vc.set_permissions(ctx.guild.default_role, overwrite=overwrite,
                                  reason=f"VoiceMeister: hidden by {ctx.author}")
         await ctx.send(embed=ok_embed("Channel **hidden** 👤."))
         await self._log_action(ctx.guild, "👤 Hidden", member=ctx.author, channel=vc)
@@ -998,7 +999,9 @@ class VoiceMeister(commands.Cog):
         vc, _ = await self._get_user_vc(ctx)
         if not vc:
             return
-        await vc.set_permissions(ctx.guild.default_role, view_channel=None,
+        overwrite = vc.overwrites_for(ctx.guild.default_role)
+        overwrite.view_channel = None
+        await vc.set_permissions(ctx.guild.default_role, overwrite=overwrite,
                                  reason=f"VoiceMeister: unhidden by {ctx.author}")
         await ctx.send(embed=ok_embed("Channel **visible** 👁️."))
         await self._log_action(ctx.guild, "👁️ Unhidden", member=ctx.author, channel=vc)
@@ -1009,7 +1012,10 @@ class VoiceMeister(commands.Cog):
         vc, _ = await self._get_user_vc(ctx)
         if not vc:
             return
-        await vc.set_permissions(ctx.guild.default_role, connect=False, view_channel=False,
+        overwrite = vc.overwrites_for(ctx.guild.default_role)
+        overwrite.connect = False
+        overwrite.view_channel = False
+        await vc.set_permissions(ctx.guild.default_role, overwrite=overwrite,
                                  reason=f"VoiceMeister: ghosted by {ctx.author}")
         await ctx.send(embed=ok_embed("Channel **ghosted** 👻 — hidden and locked."))
         await self._log_action(ctx.guild, "👻 Ghosted", member=ctx.author, channel=vc)
