@@ -1,0 +1,31 @@
+{
+    "author": [
+        "everestmcarthur"
+    ],
+    "install_msg": "Thanks for installing **SelfbotGuard v1.0.0** \u2014 advanced selfbot detection & punishment.\n\nGet started: `[p]sbguard enable` to turn it on, `[p]sbguard action <action>` to set punishment.\n\nDetection heuristics: rich-embed abuse, inhuman response speed, timing precision analysis, 24/7 activity profiling, and automated command-response pattern matching.\n\nCog is *disabled by default* \u2014 enable per-server.",
+    "name": "SelfbotGuard",
+    "disabled": false,
+    "short": "Advanced selfbot detection with configurable per-server punishments.",
+    "description": "SelfbotGuard v1.0.0 detects Discord selfbots using multiple heuristic layers: rich-embed abuse detection (user accounts cannot send rich embeds via the client), inhuman response-time analysis, message-timing precision scoring, 24/7 activity profiling, automated command-response pattern matching, and rapid-fire burst detection. Each heuristic contributes to a cumulative suspicion score per user. When the score exceeds a configurable threshold, the bot takes action: warn, mute/timeout, kick, ban, or log-only. Admins can configure sensitivity, exempt roles/users, set a dedicated log channel, and review flagged users. Cog is disabled by default per-server.",
+    "tags": [
+        "selfbot",
+        "detection",
+        "antibot",
+        "moderation",
+        "security",
+        "automod",
+        "protection",
+        "anticheat",
+        "heuristic",
+        "guard"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores Discord user IDs and guild IDs for selfbot detection. Per-user data includes message timestamps, response timing, activity windows, and suspicion scores. Data is used solely for detection heuristics and is periodically pruned.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [
+        3,
+        9,
+        0
+    ],
+    "requirements": []
+}
