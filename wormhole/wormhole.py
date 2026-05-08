@@ -1,5 +1,5 @@
 """
-Wormhole v3.3.0 — The Ultimate Cross-Server Relay Cog for Red-DiscordBot
+Wormhole v3.4.0 — The Ultimate Cross-Server Relay Cog for Red-DiscordBot
 =========================================================================
 
 Phase 1: Named networks, webhook relay, edit/delete/reply/reaction/sticker sync,
@@ -17,6 +17,10 @@ Phase 4: Hardened command filtering, anonymous mode, personal ignore lists,
           messages, auto-responses, media-only mode, network analytics,
           relay health monitor, message bookmarks, user colours, quiet hours,
           network bridging
+Phase 5: Hybrid commands (slash + prefix), context menu actions, granular
+          mention policy (per-network + per-server + per-user), rules/ToS
+          acceptance gate, mod edit/delete across network, user report system,
+          privacy & security hardening
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 import discord
+from discord import app_commands
 from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
 
@@ -50,6 +55,7 @@ from .utils import (
     DuplicateDetector,
     RaidDetector,
     announce_embed,
+    apply_mention_policy,
     build_dm_incoming_embed,
     build_dm_relay_embed,
     build_portal_embed,
@@ -226,6 +232,23 @@ _DEFAULT_NETWORK = {
     # Network bridging (one-way feeds from other networks)
     "bridge_from": [],              # network names whose messages also appear here
     "bridge_to": [],                # network names that receive our messages
+    # ── Phase 5 ──
+    # Granular mention policy
+    "mention_policy": {
+        "allow_user_mentions": True,   # allow @user pings to relay as real pings
+        "allow_role_mentions": False,  # allow @role pings
+        "allow_everyone": False,       # allow @everyone
+        "allow_here": False,           # allow @here
+    },
+    "server_mention_overrides": {},    # {guild_id_str: {same keys as mention_policy}}
+    "mention_exempt_users": [],        # user IDs allowed to bypass mention policy
+    # Rules / Terms of Service acceptance gate
+    "rules_required": False,           # must users accept before talking?
+    "rules_text": "",                  # the legal ToS text
+    "rules_accepted": {},              # {user_id_str: accepted_at_iso}
+    # Report system
+    "reports": [],                     # [{id, reporter_id, message_content_hash, reason, channel_id, guild_id, author_id, timestamp, resolved, resolved_by}]
+    "report_counter": 0,              # auto-increment
 }
 
 _DEFAULT_GLOBAL = {
@@ -268,10 +291,77 @@ class _MessageMap:
         return list(self.forward.get(network, {}).get(original_id, {}).values())
 
 
+class _ReportModal(discord.ui.Modal, title="Report Message"):
+    """Modal for reporting a message through the context menu."""
+    reason = discord.ui.TextInput(
+        label="Reason for report",
+        style=discord.TextStyle.paragraph,
+        placeholder="Describe why you're reporting this message...",
+        max_length=500,
+        required=True,
+    )
+
+    def __init__(self, cog: "Wormhole", net_name: str, message: discord.Message):
+        super().__init__()
+        self.cog = cog
+        self.net_name = net_name
+        self.target = message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        nd = await self.cog._net(self.net_name)
+        if not nd:
+            return await interaction.response.send_message("Network not found.", ephemeral=True)
+
+        content_hash = hashlib.sha256((self.target.content or "").encode()).hexdigest()[:16]
+        async with self.cog.config.networks() as n:
+            counter = n[self.net_name].get("report_counter", 0) + 1
+            n[self.net_name]["report_counter"] = counter
+            report = {
+                "id": counter,
+                "reporter_id": interaction.user.id,
+                "author_id": self.target.author.id,
+                "author_name": str(self.target.author),
+                "content_preview": truncate(self.target.content or "[no text]", 200),
+                "content_hash": content_hash,
+                "reason": str(self.reason)[:500],
+                "channel_id": self.target.channel.id,
+                "guild_id": self.target.guild.id if self.target.guild else 0,
+                "message_id": self.target.id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "resolved": False,
+                "resolved_by": None,
+            }
+            n[self.net_name].setdefault("reports", []).append(report)
+            if len(n[self.net_name]["reports"]) > 200:
+                n[self.net_name]["reports"] = n[self.net_name]["reports"][-200:]
+
+        self.cog._report_cooldowns[interaction.user.id] = time.time()
+
+        # Build embed for log + owner
+        report_em = discord.Embed(
+            title=f"🚨 Report #{counter} — {self.net_name}",
+            colour=discord.Colour.red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        report_em.add_field(name="Reported User", value=f"{self.target.author} (`{self.target.author.id}`)", inline=True)
+        report_em.add_field(name="Reporter", value=f"{interaction.user} (`{interaction.user.id}`)", inline=True)
+        report_em.add_field(name="Reason", value=str(self.reason)[:1024], inline=False)
+        report_em.add_field(name="Message Content", value=f"```{truncate(self.target.content or '[no text]', 1000)}```", inline=False)
+        report_em.set_footer(text=f"Content hash: {content_hash}")
+
+        await self.cog._log(nd, report_em)
+        owner = self.cog.bot.get_user(nd.get("owner_id"))
+        if owner:
+            try: await owner.send(embed=report_em)
+            except: pass
+
+        await interaction.response.send_message(f"🚨 Report #{counter} submitted. Staff notified.", ephemeral=True)
+
+
 class Wormhole(commands.Cog):
     """The ultimate cross-server relay: networks, DMs, starboard, auto-mod, invites, portals & more."""
 
-    __version__ = "3.3.0"
+    __version__ = "3.4.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -286,6 +376,10 @@ class Wormhole(commands.Cog):
         self.msg_map = _MessageMap()
         self._autoresponse_cooldowns: Dict[str, float] = {}  # "net:pattern" -> last_trigger
         self._ephemeral_tasks: List[asyncio.Task] = []
+        self._report_cooldowns: Dict[int, float] = {}  # user_id -> last report timestamp
+
+        # Context menus (registered in _init after bot ready)
+        self._ctx_menus: List[app_commands.ContextMenu] = []
 
         self._ready = asyncio.Event()
         self._bg_tasks: List[asyncio.Task] = []
@@ -305,17 +399,45 @@ class Wormhole(commands.Cog):
             self._bg_tasks.append(asyncio.ensure_future(self._scheduled_msg_loop()))
             self._bg_tasks.append(asyncio.ensure_future(self._health_check_loop()))
             self._bg_tasks.append(asyncio.ensure_future(self._poll_expiry_loop()))
-            log.info("Wormhole v3.3.0 ready — %d networks loaded.", len(networks))
+            # Register context menus
+            self._register_context_menus()
+            log.info("Wormhole v3.4.0 ready — %d networks loaded.", len(networks))
         except Exception as exc:
             log.error("Wormhole init error (relay will still work): %s", exc, exc_info=True)
         finally:
             # ALWAYS set ready so the relay isn't permanently stuck
             self._ready.set()
 
+    def _register_context_menus(self):
+        """Register right-click context menu actions."""
+        # ── Report Message ──
+        report_menu = app_commands.ContextMenu(name="Report to Wormhole", callback=self._ctx_report_message)
+        self.bot.tree.add_command(report_menu)
+        self._ctx_menus.append(report_menu)
+
+        # ── Bookmark Message ──
+        bookmark_menu = app_commands.ContextMenu(name="Wormhole Bookmark", callback=self._ctx_bookmark_message)
+        self.bot.tree.add_command(bookmark_menu)
+        self._ctx_menus.append(bookmark_menu)
+
+        # ── Delete from Network (staff) ──
+        delete_menu = app_commands.ContextMenu(name="Wormhole Delete", callback=self._ctx_delete_message)
+        self.bot.tree.add_command(delete_menu)
+        self._ctx_menus.append(delete_menu)
+
+        # ── View Wormhole Profile ──
+        profile_menu = app_commands.ContextMenu(name="Wormhole Profile", callback=self._ctx_view_profile)
+        self.bot.tree.add_command(profile_menu)
+        self._ctx_menus.append(profile_menu)
+
     async def cog_unload(self):
         self._startup_task.cancel()
         for t in self._bg_tasks:
             t.cancel()
+        # Remove context menus
+        for menu in self._ctx_menus:
+            self.bot.tree.remove_command(menu.name, type=menu.type)
+        self._ctx_menus.clear()
 
     # ── Background loops ────────────────────────────────────────────────────
 
@@ -776,7 +898,7 @@ class Wormhole(commands.Cog):
 
     # ── Main group ──────────────────────────────────────────────────────────
 
-    @commands.group(name="wh", aliases=["wormhole"], invoke_without_command=True)
+    @commands.hybrid_group(name="wh", aliases=["wormhole"], invoke_without_command=True, fallback="help_overview")
     async def wh(self, ctx: commands.Context):
         """🌀 Wormhole — the ultimate cross-server relay. Use `[p]wh help` for commands."""
         await ctx.send_help(ctx.command)
@@ -2736,6 +2858,647 @@ class Wormhole(commands.Cog):
         await ctx.send(embed=info_embed("\n".join(lines) if lines else "No bridges.", title=f"Bridges — {name}"))
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  PHASE 5 — MENTION POLICY
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.group(name="mentions", invoke_without_command=True)
+    async def wh_mentions(self, ctx):
+        """Granular mention/ping controls (per-network, per-server, per-user)."""
+        await ctx.send_help(ctx.command)
+
+    @wh_mentions.command(name="set")
+    async def wh_mentions_set(self, ctx, name: str, mention_type: str, toggle: bool):
+        """Set network-wide mention policy. Types: users, roles, everyone, here."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        key_map = {"users": "allow_user_mentions", "roles": "allow_role_mentions",
+                    "everyone": "allow_everyone", "here": "allow_here"}
+        if mention_type not in key_map:
+            return await ctx.send(embed=err_embed(f"Invalid type. Choose: {', '.join(key_map.keys())}"))
+        async with self.config.networks() as n:
+            n[name].setdefault("mention_policy", {})[key_map[mention_type]] = toggle
+        state = "allowed" if toggle else "blocked"
+        await ctx.send(embed=ok_embed(f"**@{mention_type}** mentions are now *{state}* on **{name}**."))
+        await self._audit(name, "mention_policy", ctx.author, details=f"{mention_type}={toggle}")
+
+    @wh_mentions.command(name="server-set")
+    @commands.guild_only()
+    async def wh_mentions_server(self, ctx, name: str, mention_type: str, toggle: bool):
+        """Override mention policy for THIS server only. Types: users, roles, everyone, here."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        key_map = {"users": "allow_user_mentions", "roles": "allow_role_mentions",
+                    "everyone": "allow_everyone", "here": "allow_here"}
+        if mention_type not in key_map:
+            return await ctx.send(embed=err_embed(f"Invalid type. Choose: {', '.join(key_map.keys())}"))
+        gid = str(ctx.guild.id)
+        async with self.config.networks() as n:
+            overrides = n[name].setdefault("server_mention_overrides", {}).setdefault(gid, {})
+            overrides[key_map[mention_type]] = toggle
+        state = "allowed" if toggle else "blocked"
+        await ctx.send(embed=ok_embed(f"**@{mention_type}** mentions *{state}* for this server on **{name}**."))
+
+    @wh_mentions.command(name="exempt")
+    async def wh_mentions_exempt(self, ctx, name: str, user: discord.User):
+        """Allow a user to bypass mention restrictions."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            exempt = n[name].setdefault("mention_exempt_users", [])
+            if user.id not in exempt:
+                exempt.append(user.id)
+        await ctx.send(embed=ok_embed(f"**{user.display_name}** can now bypass mention policy on **{name}**."))
+
+    @wh_mentions.command(name="unexempt")
+    async def wh_mentions_unexempt(self, ctx, name: str, user: discord.User):
+        """Remove a user's mention exemption."""
+        name = name.lower()
+        async with self.config.networks() as n:
+            if name in n:
+                exempt = n[name].get("mention_exempt_users", [])
+                if user.id in exempt:
+                    exempt.remove(user.id)
+        await ctx.send(embed=ok_embed(f"**{user.display_name}** must follow mention policy now."))
+
+    @wh_mentions.command(name="status")
+    async def wh_mentions_status(self, ctx, name: str):
+        """View the current mention policy for a network."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        mp = d.get("mention_policy", {})
+        sym = lambda v: "✅" if v else "❌"
+        lines = [
+            f"**@user mentions:** {sym(mp.get('allow_user_mentions', True))}",
+            f"**@role mentions:** {sym(mp.get('allow_role_mentions', False))}",
+            f"**@everyone:** {sym(mp.get('allow_everyone', False))}",
+            f"**@here:** {sym(mp.get('allow_here', False))}",
+        ]
+        exempt = d.get("mention_exempt_users", [])
+        if exempt:
+            names = [str(self.bot.get_user(uid) or uid) for uid in exempt[:10]]
+            lines.append(f"\n**Exempt users:** {', '.join(names)}")
+        overrides = d.get("server_mention_overrides", {})
+        if overrides:
+            lines.append(f"\n**Server overrides:** {len(overrides)} server(s)")
+            for gid_str, ov in list(overrides.items())[:5]:
+                g = self.bot.get_guild(int(gid_str))
+                gname = g.name if g else gid_str
+                ov_lines = ", ".join(f"{k.replace('allow_', '')}={sym(v)}" for k, v in ov.items())
+                lines.append(f"  • {gname}: {ov_lines}")
+        await ctx.send(embed=info_embed("\n".join(lines), title=f"Mention Policy — {name}"))
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  PHASE 5 — RULES / TERMS OF SERVICE ACCEPTANCE
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    _LEGAL_TEMPLATE = (
+        "**WORMHOLE NETWORK TERMS OF SERVICE & CODE OF CONDUCT**\n\n"
+        "By using this cross-server communication network (the \"Network\"), you agree "
+        "to the following terms. Violation may result in permanent removal and your "
+        "messages being reported to Discord Trust & Safety and/or law enforcement.\n\n"
+        "**§1 — Content Standards**\n"
+        "All content must be appropriate for a general audience (Rated G). You shall NOT:\n"
+        "• Post, share, or reference NSFW, explicit, or sexually suggestive content\n"
+        "• Discuss, promote, or reference illegal activities, substances, or services\n"
+        "• Share content depicting or promoting violence, gore, or self-harm\n"
+        "• Post personal information (\"doxing\") of any individual\n"
+        "• Distribute malware, phishing links, or malicious code\n\n"
+        "**§2 — Conduct & Harassment**\n"
+        "You shall NOT:\n"
+        "• Harass, bully, intimidate, or threaten any user\n"
+        "• Discriminate or use hate speech based on race, ethnicity, gender, sexual "
+        "orientation, religion, disability, or any protected characteristic\n"
+        "• Impersonate other users, staff, or Discord employees\n"
+        "• Spam, flood, or disrupt the network in any way\n"
+        "• Evade bans, mutes, or other moderation actions\n\n"
+        "**§3 — Privacy & Data**\n"
+        "• Your Discord user ID, username, and message metadata are processed for relay "
+        "functionality and moderation\n"
+        "• Message content may be logged for moderation and audit purposes\n"
+        "• Staff may review flagged content; all moderation is logged\n"
+        "• You consent to your messages being relayed to other servers in this network\n\n"
+        "**§4 — Intellectual Property**\n"
+        "• You retain ownership of your content but grant the network a non-exclusive "
+        "license to relay and display it\n"
+        "• Do not post copyrighted material without permission\n\n"
+        "**§5 — Enforcement & Liability**\n"
+        "• Network staff reserve the right to remove content and ban users at discretion\n"
+        "• Violations may be reported to Discord and/or relevant authorities\n"
+        "• Evidence of illegal activity will be preserved and forwarded to law enforcement\n"
+        "• The network operators are not liable for user-generated content\n"
+        "• These terms may be updated; continued use constitutes acceptance\n\n"
+        "**§6 — Agreement**\n"
+        "By typing the accept command, you acknowledge that you have read, understood, "
+        "and agree to abide by these terms. You understand that violations may result in "
+        "permanent removal from the network, reporting to Discord Trust & Safety, and "
+        "where applicable, referral to law enforcement authorities."
+    )
+
+    @wh.group(name="tos", aliases=["terms"], invoke_without_command=True)
+    async def wh_tos(self, ctx):
+        """Manage the Terms of Service / rules acceptance system."""
+        await ctx.send_help(ctx.command)
+
+    @wh_tos.command(name="enable")
+    async def wh_tos_enable(self, ctx, name: str):
+        """Require users to accept rules before talking. Sets default legal ToS if none exists."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            n[name]["rules_required"] = True
+            if not n[name].get("rules_text"):
+                n[name]["rules_text"] = self._LEGAL_TEMPLATE
+        await ctx.send(embed=ok_embed(
+            f"Rules acceptance is now *required* on **{name}**.\n"
+            "Users must run `[p]wh accept " + name + "` before they can relay messages.\n"
+            "Use `[p]wh tos set` to customise the terms."
+        ))
+        await self._audit(name, "tos_enabled", ctx.author)
+
+    @wh_tos.command(name="disable")
+    async def wh_tos_disable(self, ctx, name: str):
+        """Disable rules acceptance requirement."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            n[name]["rules_required"] = False
+        await ctx.send(embed=ok_embed(f"Rules acceptance no longer required on **{name}**."))
+
+    @wh_tos.command(name="set")
+    async def wh_tos_set(self, ctx, name: str, *, text: str):
+        """Set custom rules/ToS text (replaces default template)."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        if len(text) > 4000:
+            return await ctx.send(embed=err_embed("Text too long (max 4000 chars)."))
+        async with self.config.networks() as n:
+            n[name]["rules_text"] = text
+        await ctx.send(embed=ok_embed(f"ToS updated for **{name}** ({len(text)} chars)."))
+
+    @wh_tos.command(name="template")
+    async def wh_tos_template(self, ctx, name: str):
+        """Reset to the built-in legal template."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            n[name]["rules_text"] = self._LEGAL_TEMPLATE
+        await ctx.send(embed=ok_embed(f"ToS reset to default legal template for **{name}**."))
+
+    @wh_tos.command(name="accepted")
+    async def wh_tos_accepted(self, ctx, name: str):
+        """View how many users have accepted the ToS."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        accepted = d.get("rules_accepted", {})
+        lines = [f"**{len(accepted)}** users have accepted the ToS."]
+        for uid_str, ts in list(accepted.items())[:20]:
+            u = self.bot.get_user(int(uid_str))
+            uname = u.display_name if u else uid_str
+            lines.append(f"• {uname} — {ts[:16]}")
+        if len(accepted) > 20:
+            lines.append(f"*...and {len(accepted) - 20} more.*")
+        await ctx.send(embed=info_embed("\n".join(lines), title=f"ToS Accepted — {name}"))
+
+    @wh_tos.command(name="reset")
+    async def wh_tos_reset(self, ctx, name: str):
+        """Clear all acceptances (force everyone to re-accept)."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            n[name]["rules_accepted"] = {}
+        await ctx.send(embed=ok_embed(f"All ToS acceptances cleared for **{name}**. Users must re-accept."))
+        await self._audit(name, "tos_reset", ctx.author)
+
+    @wh.command(name="accept")
+    async def wh_accept(self, ctx, name: str):
+        """View and accept a network's Terms of Service / rules."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        rules_text = d.get("rules_text", "")
+        if not rules_text:
+            return await ctx.send(embed=info_embed("This network has no rules set.", title=f"Rules — {name}"))
+        already = str(ctx.author.id) in d.get("rules_accepted", {})
+        if already:
+            return await ctx.send(embed=info_embed("You've already accepted the rules.", title=f"Rules — {name}"))
+        # Show rules in pages if needed
+        if len(rules_text) <= 4000:
+            em = discord.Embed(title=f"📜 Terms of Service — {name}", description=rules_text, colour=COLOUR_INFO)
+            em.set_footer(text=f"Type '{ctx.clean_prefix}wh agree {name}' to accept these terms.")
+            await ctx.send(embed=em)
+        else:
+            # Split into chunks
+            for i in range(0, len(rules_text), 4000):
+                chunk = rules_text[i:i+4000]
+                em = discord.Embed(description=chunk, colour=COLOUR_INFO)
+                if i == 0:
+                    em.title = f"📜 Terms of Service — {name}"
+                await ctx.send(embed=em)
+            await ctx.send(embed=info_embed(f"Type `{ctx.clean_prefix}wh agree {name}` to accept these terms."))
+
+    @wh.command(name="agree")
+    async def wh_agree(self, ctx, name: str):
+        """Confirm acceptance of a network's Terms of Service."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not d.get("rules_text"):
+            return await ctx.send(embed=err_embed("This network has no ToS."))
+        uid = str(ctx.author.id)
+        if uid in d.get("rules_accepted", {}):
+            return await ctx.send(embed=info_embed("You've already accepted."))
+        async with self.config.networks() as n:
+            n[name].setdefault("rules_accepted", {})[uid] = datetime.now(timezone.utc).isoformat()
+        await ctx.send(embed=ok_embed(
+            f"✅ You have accepted the Terms of Service for **{name}**.\n"
+            f"Your agreement has been recorded at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.\n"
+            "You may now send messages through this network."
+        ))
+        await self._audit(name, "tos_accepted", ctx.author)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  PHASE 5 — MOD EDIT / DELETE THROUGH NETWORK
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh_mod.command(name="edit")
+    @commands.guild_only()
+    async def wh_mod_edit(self, ctx, name: str, message_id: int, *, new_content: str):
+        """Edit a message across the entire network. Provide the original message ID."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        mapping = self.msg_map.get_relayed(name, message_id)
+        if not mapping:
+            return await ctx.send(embed=err_embed("Message not found in relay map. Only recent messages can be edited."))
+        mode = d.get("relay_mode", "webhook")
+        edited = 0
+        for ch_id, mid in mapping.items():
+            ch = self.bot.get_channel(ch_id)
+            if not ch: continue
+            try:
+                cm = self._get_override(d, ch_id, "relay_mode") or mode
+                if cm == "webhook":
+                    wh = await self._wh(ch)
+                    await wh.edit_message(mid, content=new_content)
+                else:
+                    msg = await ch.fetch_message(mid)
+                    if msg.author.id == self.bot.user.id:
+                        await msg.edit(content=new_content)
+                edited += 1
+            except:
+                pass
+        # Also try editing the original message in the source channel
+        for ch_id in d.get("channels", []):
+            ch = self.bot.get_channel(ch_id)
+            if not ch: continue
+            try:
+                orig = await ch.fetch_message(message_id)
+                # Can't edit other users' messages, but note it in the response
+                break
+            except:
+                pass
+        await ctx.send(embed=ok_embed(f"Edited across **{edited}** relayed copies."))
+        await self._audit(name, "mod_edit", ctx.author, details=f"msg={message_id}, edited={edited}")
+
+    @wh_mod.command(name="nuke", aliases=["network-delete"])
+    @commands.guild_only()
+    async def wh_mod_nuke(self, ctx, name: str, message_id: int):
+        """Delete a message from the entire network. Provide the original message ID."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        mapping = self.msg_map.get_relayed(name, message_id)
+        if not mapping:
+            return await ctx.send(embed=err_embed("Message not found in relay map. Only recent messages can be deleted."))
+        mode = d.get("relay_mode", "webhook")
+        deleted = 0
+        for ch_id, mid in mapping.items():
+            ch = self.bot.get_channel(ch_id)
+            if not ch: continue
+            try:
+                cm = self._get_override(d, ch_id, "relay_mode") or mode
+                if cm == "webhook":
+                    wh = await self._wh(ch)
+                    await wh.delete_message(mid)
+                else:
+                    msg = await ch.fetch_message(mid)
+                    await msg.delete()
+                deleted += 1
+            except:
+                pass
+        # Also try deleting the original message
+        for ch_id in d.get("channels", []):
+            ch = self.bot.get_channel(ch_id)
+            if not ch: continue
+            try:
+                orig = await ch.fetch_message(message_id)
+                await orig.delete()
+                deleted += 1
+                break
+            except:
+                pass
+        await ctx.send(embed=ok_embed(f"Deleted from **{deleted}** locations across the network."))
+        await self._audit(name, "mod_network_delete", ctx.author, details=f"msg={message_id}, deleted={deleted}")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  PHASE 5 — REPORT SYSTEM
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @wh.group(name="report", invoke_without_command=True)
+    async def wh_report(self, ctx):
+        """Report messages or manage reports."""
+        await ctx.send_help(ctx.command)
+
+    @wh_report.command(name="message")
+    @commands.guild_only()
+    async def wh_report_msg(self, ctx, message_id: int = None, *, reason: str = "No reason provided"):
+        """Report a message. Reply to a message or provide a message ID."""
+        # Anti-abuse cooldown (1 report per 60s per user)
+        now = time.time()
+        last = self._report_cooldowns.get(ctx.author.id, 0)
+        if now - last < 60:
+            return await ctx.send(embed=err_embed(f"Please wait {int(60 - (now - last))}s before reporting again."), delete_after=10)
+
+        target = None
+        if ctx.message.reference and ctx.message.reference.message_id:
+            try: target = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+            except: pass
+        elif message_id:
+            try: target = await ctx.channel.fetch_message(message_id)
+            except: pass
+        if not target:
+            return await ctx.send(embed=err_embed("Reply to a message or provide a valid message ID."))
+
+        # Find network
+        net_name = await self._net_for_ch(ctx.channel.id)
+        if not net_name:
+            return await ctx.send(embed=err_embed("This channel is not part of a wormhole network."))
+        nd = await self._net(net_name)
+        if not nd: return
+
+        # Create report
+        content_hash = hashlib.sha256((target.content or "").encode()).hexdigest()[:16]
+        async with self.config.networks() as n:
+            counter = n[net_name].get("report_counter", 0) + 1
+            n[net_name]["report_counter"] = counter
+            report = {
+                "id": counter,
+                "reporter_id": ctx.author.id,
+                "author_id": target.author.id,
+                "author_name": str(target.author),
+                "content_preview": truncate(target.content or "[no text]", 200),
+                "content_hash": content_hash,
+                "reason": truncate(reason, 500),
+                "channel_id": ctx.channel.id,
+                "guild_id": ctx.guild.id,
+                "message_id": target.id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "resolved": False,
+                "resolved_by": None,
+            }
+            n[net_name].setdefault("reports", []).append(report)
+            # Cap at 200 reports
+            if len(n[net_name]["reports"]) > 200:
+                n[net_name]["reports"] = n[net_name]["reports"][-200:]
+
+        self._report_cooldowns[ctx.author.id] = now
+
+        # Notify reporter
+        await ctx.send(embed=ok_embed(f"Report #{counter} submitted. Staff has been notified."), delete_after=10)
+        try: await ctx.message.delete()
+        except: pass
+
+        # Send to log channel
+        report_em = discord.Embed(
+            title=f"🚨 Report #{counter} — {net_name}",
+            colour=discord.Colour.red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        report_em.add_field(name="Reported User", value=f"{target.author} (`{target.author.id}`)", inline=True)
+        report_em.add_field(name="Reporter", value=f"{ctx.author} (`{ctx.author.id}`)", inline=True)
+        report_em.add_field(name="Server", value=ctx.guild.name, inline=True)
+        report_em.add_field(name="Reason", value=reason[:1024], inline=False)
+        report_em.add_field(name="Message Content", value=f"```{truncate(target.content or '[no text]', 1000)}```", inline=False)
+        if target.attachments:
+            report_em.add_field(name="Attachments", value="\n".join(a.url for a in target.attachments[:5]), inline=False)
+        report_em.set_footer(text=f"Content hash: {content_hash} | Message ID: {target.id}")
+
+        await self._log(nd, report_em)
+
+        # DM network owner
+        owner = self.bot.get_user(nd.get("owner_id"))
+        if owner:
+            try: await owner.send(embed=report_em)
+            except: pass
+
+        await self._audit(net_name, "report_filed", ctx.author, details=f"#{counter} against {target.author}")
+
+    @wh_report.command(name="list")
+    async def wh_report_list(self, ctx, name: str, show_resolved: bool = False):
+        """View reports for a network (staff only)."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        reports = d.get("reports", [])
+        if not show_resolved:
+            reports = [r for r in reports if not r.get("resolved")]
+        if not reports:
+            return await ctx.send(embed=info_embed("No reports." if not show_resolved else "No reports at all.", title=f"Reports — {name}"))
+        lines = []
+        for r in reversed(reports[-20:]):
+            status = "✅" if r.get("resolved") else "⏳"
+            u = self.bot.get_user(r.get("author_id"))
+            author = u.display_name if u else str(r.get("author_name", "?"))
+            lines.append(f"{status} **#{r['id']}** — {author}: *{truncate(r.get('reason', ''), 60)}* ({r['timestamp'][:10]})")
+        await ctx.send(embed=info_embed("\n".join(lines), title=f"Reports — {name}"))
+
+    @wh_report.command(name="resolve")
+    async def wh_report_resolve(self, ctx, name: str, report_id: int):
+        """Resolve a report."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        async with self.config.networks() as n:
+            reports = n[name].get("reports", [])
+            for r in reports:
+                if r["id"] == report_id:
+                    r["resolved"] = True
+                    r["resolved_by"] = ctx.author.id
+                    await ctx.send(embed=ok_embed(f"Report #{report_id} resolved."))
+                    await self._audit(name, "report_resolved", ctx.author, details=f"#{report_id}")
+                    return
+        await ctx.send(embed=err_embed(f"Report #{report_id} not found."))
+
+    @wh_report.command(name="action")
+    async def wh_report_action(self, ctx, name: str, report_id: int, action: str):
+        """Take action on a report: ban, mute, warn, or dismiss."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Not found."))
+        if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
+        report = None
+        for r in d.get("reports", []):
+            if r["id"] == report_id:
+                report = r; break
+        if not report:
+            return await ctx.send(embed=err_embed(f"Report #{report_id} not found."))
+        target_id = report.get("author_id")
+        action = action.lower()
+        if action == "ban":
+            async with self.config.networks() as n:
+                if target_id not in n[name].get("banned_users", []):
+                    n[name].setdefault("banned_users", []).append(target_id)
+            await ctx.send(embed=ok_embed(f"User `{target_id}` banned from **{name}**."))
+        elif action == "mute":
+            async with self.config.networks() as n:
+                if target_id not in n[name].get("muted_users", []):
+                    n[name].setdefault("muted_users", []).append(target_id)
+            await ctx.send(embed=ok_embed(f"User `{target_id}` muted on **{name}**."))
+        elif action == "warn":
+            target = self.bot.get_user(target_id)
+            if target:
+                try:
+                    await target.send(embed=warn_embed(
+                        f"⚠️ You have received a warning on the **{name}** wormhole network.\n"
+                        f"Reason: {report.get('reason', 'Policy violation')}\n\n"
+                        "Further violations may result in a permanent ban."
+                    ))
+                    await ctx.send(embed=ok_embed(f"Warning sent to {target.display_name}."))
+                except:
+                    await ctx.send(embed=err_embed("Couldn't DM the user."))
+            else:
+                await ctx.send(embed=err_embed("User not found."))
+        elif action == "dismiss":
+            pass
+        else:
+            return await ctx.send(embed=err_embed("Action must be: `ban`, `mute`, `warn`, or `dismiss`."))
+        # Resolve the report
+        async with self.config.networks() as n:
+            for r in n[name].get("reports", []):
+                if r["id"] == report_id:
+                    r["resolved"] = True
+                    r["resolved_by"] = ctx.author.id
+                    break
+        await self._audit(name, f"report_action_{action}", ctx.author, details=f"#{report_id} target={target_id}")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  PHASE 5 — CONTEXT MENU CALLBACKS
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def _ctx_report_message(self, interaction: discord.Interaction, message: discord.Message):
+        """Context menu: Report a message to Wormhole."""
+        net_name = await self._net_for_ch(message.channel.id)
+        if not net_name:
+            return await interaction.response.send_message("This channel is not part of a wormhole network.", ephemeral=True)
+        # Anti-abuse cooldown
+        now = time.time()
+        last = self._report_cooldowns.get(interaction.user.id, 0)
+        if now - last < 60:
+            return await interaction.response.send_message(f"Please wait {int(60 - (now - last))}s.", ephemeral=True)
+
+        # Show modal for reason
+        modal = _ReportModal(self, net_name, message)
+        await interaction.response.send_modal(modal)
+
+    async def _ctx_bookmark_message(self, interaction: discord.Interaction, message: discord.Message):
+        """Context menu: Bookmark a message."""
+        bm = {
+            "content": truncate(message.content or "[no text]", 500),
+            "author": str(message.author),
+            "server": message.guild.name if message.guild else "DM",
+            "channel": message.channel.name,
+            "timestamp": message.created_at.isoformat(),
+            "jump_url": message.jump_url,
+        }
+        uid = str(interaction.user.id)
+        async with self.config.bookmarks() as bookmarks:
+            bookmarks.setdefault(uid, []).append(bm)
+            if len(bookmarks[uid]) > 50:
+                bookmarks[uid] = bookmarks[uid][-50:]
+        # DM the bookmark
+        try:
+            em = info_embed(
+                f"**{bm['author']}** in #{bm['channel']} ({bm['server']}):\n\n"
+                f"> {truncate(bm['content'], 300)}\n\n[Jump]({bm['jump_url']})",
+                title="🔖 Bookmark Saved"
+            )
+            await interaction.user.send(embed=em)
+        except:
+            pass
+        await interaction.response.send_message("🔖 Bookmarked! Check your DMs.", ephemeral=True)
+
+    async def _ctx_delete_message(self, interaction: discord.Interaction, message: discord.Message):
+        """Context menu: Delete a message from the entire network (staff only)."""
+        net_name = await self._net_for_ch(message.channel.id)
+        if not net_name:
+            return await interaction.response.send_message("Not a wormhole channel.", ephemeral=True)
+        nd = await self._net(net_name)
+        if not nd:
+            return await interaction.response.send_message("Network not found.", ephemeral=True)
+        if not await self._is_staff(nd, interaction.user.id) and not await self.bot.is_owner(interaction.user):
+            return await interaction.response.send_message("Staff only.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        mapping = self.msg_map.get_relayed(net_name, message.id)
+        deleted = 0
+        # Delete relayed copies
+        if mapping:
+            mode = nd.get("relay_mode", "webhook")
+            for ch_id, mid in mapping.items():
+                ch = self.bot.get_channel(ch_id)
+                if not ch: continue
+                try:
+                    cm = self._get_override(nd, ch_id, "relay_mode") or mode
+                    if cm == "webhook":
+                        wh = await self._wh(ch)
+                        await wh.delete_message(mid)
+                    else:
+                        msg = await ch.fetch_message(mid)
+                        await msg.delete()
+                    deleted += 1
+                except:
+                    pass
+        # Delete original
+        try:
+            await message.delete()
+            deleted += 1
+        except:
+            pass
+        await interaction.followup.send(f"Deleted from {deleted} location(s).", ephemeral=True)
+        await self._audit(net_name, "ctx_delete", interaction.user, details=f"msg={message.id}")
+
+    async def _ctx_view_profile(self, interaction: discord.Interaction, user: discord.User):
+        """Context menu: View a user's Wormhole profile."""
+        nets = await self.config.networks()
+        found = []
+        for name, data in nets.items():
+            profiles = data.get("user_profiles", {})
+            uid = str(user.id)
+            if uid in profiles:
+                p = profiles[uid]
+                found.append((name, p))
+        if not found:
+            return await interaction.response.send_message(f"{user.display_name} has no Wormhole profiles.", ephemeral=True)
+        em = discord.Embed(title=f"👤 {user.display_name} — Wormhole Profile", colour=COLOUR_INFO)
+        em.set_thumbnail(url=user.display_avatar.url)
+        for name, p in found[:5]:
+            msgs = p.get("messages", 0)
+            servers = len(p.get("guilds", []))
+            karma_data = (await self._net(name) or {}).get("karma_scores", {})
+            karma = karma_data.get(str(user.id), 0)
+            em.add_field(
+                name=name,
+                value=f"Messages: **{msgs:,}** | Servers: **{servers}** | Karma: **{karma}**",
+                inline=False,
+            )
+        await interaction.response.send_message(embed=em, ephemeral=True)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  DEBUG
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2891,6 +3654,25 @@ class Wormhole(commands.Cog):
         if message.guild.id in nd.get("banned_servers", []): return
         if message.guild.id in nd.get("muted_servers", []): return
 
+        # Rules acceptance gate (Phase 5)
+        if nd.get("rules_required"):
+            accepted = nd.get("rules_accepted", {})
+            if str(message.author.id) not in accepted:
+                try:
+                    prefix = (await self.bot.get_prefix(message))
+                    if isinstance(prefix, list):
+                        prefix = prefix[0]
+                    await message.channel.send(
+                        embed=warn_embed(
+                            f"{message.author.mention}, you must accept the network rules before messaging.\n"
+                            f"Use `{prefix}wh accept {net_name}` to view and accept."
+                        ),
+                        delete_after=15,
+                    )
+                except:
+                    pass
+                return
+
         # Content filter
         if message.content:
             if check_filters(message.content, nd.get("word_filters", []), nd.get("regex_filters", [])):
@@ -2967,8 +3749,16 @@ class Wormhole(commands.Cog):
         # ── Build payload ──────────────────────────────────────────────────
         relay_mode = nd.get("relay_mode", "webhook")
         nick = nd.get("server_nicknames", {}).get(str(message.guild.id))
-        mc = nd.get("mention_control", {})
-        content = sanitise_mentions(message.content or "", mc)
+        # Mention control — Phase 5 granular policy takes priority, falls back to legacy
+        mp = nd.get("mention_policy", {})
+        server_overrides = nd.get("server_mention_overrides", {}).get(str(message.guild.id))
+        active_policy = server_overrides if server_overrides else mp
+        exempt = nd.get("mention_exempt_users", [])
+        if active_policy:
+            content = apply_mention_policy(message.content or "", active_policy, message.author.id, exempt)
+        else:
+            mc = nd.get("mention_control", {})
+            content = sanitise_mentions(message.content or "", mc)
 
         # Anonymous mode
         is_anon = nd.get("anonymous", False)
@@ -3322,10 +4112,10 @@ class Wormhole(commands.Cog):
     async def wh_help(self, ctx):
         """Full command reference."""
         p = ctx.clean_prefix
-        e1 = discord.Embed(title="🌀 Wormhole v3.2.0 — Commands (1/3)", colour=COLOUR_NEUTRAL,
-            description="The ultimate cross-server relay: webhooks, DMs, embeds, starboard, auto-mod, invites, karma, portals, highlights, search & more.")
+        e1 = discord.Embed(title="🌀 Wormhole v3.4.0 — Commands (1/4)", colour=COLOUR_NEUTRAL,
+            description="The ultimate cross-server relay: hybrid slash+prefix commands, context menus, webhooks, DMs, embeds, starboard, auto-mod, invites, karma, portals, highlights, search & more.")
         e1.add_field(name="📡 Networks", value=(
-            f"`{p}wh create/delete/open/close/list/info/stats`\n"
+            f"`{p}wh create/delete/open/close/list/info`\n"
             f"`{p}wh discover` — public networks\n"
             f"`{p}wh transfer <name> @user`\n"
             f"`{p}wh announce <name> <msg>` — broadcast\n"
@@ -3337,10 +4127,11 @@ class Wormhole(commands.Cog):
             f"`relay-mode` `webhooks` `name-mode` `image-mode` `custom-icon` `custom-name`\n"
             f"`description` `colour` `ratelimit` `slowmode` `relay-delay` `log-channel` `nickname`\n"
             f"`welcome` `motd` `rules` `tags` `public` `max-filesize` `blocked-extensions`\n"
-            f"`freeze` `silent` `nsfw-gate` `sync-edits/deletes/reactions/replies/stickers/threads/pins/typing`\n"
+            f"`freeze` `silent` `nsfw-gate` `anonymous` `ephemeral` `media-only`\n"
+            f"`sync-edits/deletes/reactions/replies/stickers/threads/pins/typing`\n"
             f"`forward-embeds` `strip-everyone/roles/users` `channel-override`"), inline=False)
 
-        e2 = discord.Embed(title="🌀 Commands (2/3)", colour=COLOUR_NEUTRAL)
+        e2 = discord.Embed(title="🌀 Commands (2/4)", colour=COLOUR_NEUTRAL)
         e2.add_field(name="📧 DM Relay (`wh dm`)", value=(
             f"`enable/disable <name>`\n"
             f"`mode <name> <embed|compact|plain>`\n"
@@ -3356,12 +4147,12 @@ class Wormhole(commands.Cog):
         e2.add_field(name="🛡️ Mod (`wh mod`)", value=(
             f"`ban/unban/mute/unmute <name> @user`\n"
             f"`ban-server/unban-server/mute-server/unmute-server`\n"
-            f"`allowlist-add/remove` `purge <name> [n]`"), inline=False)
+            f"`allowlist-add/remove` `purge` `edit` `nuke`"), inline=False)
         e2.add_field(name="🤖 Auto-Mod (`wh automod`)", value=(
             f"`enable/disable` `anti-spam/mentions/caps/invite/link`\n"
             f"`anti-zalgo/spoiler/emote-spam/newlines/raid` `status`"), inline=False)
 
-        e3 = discord.Embed(title="🌀 Commands (3/3)", colour=COLOUR_NEUTRAL)
+        e3 = discord.Embed(title="🌀 Commands (3/4)", colour=COLOUR_NEUTRAL)
         e3.add_field(name="🔍 Filters", value="`add-word/remove-word` `add-regex/remove-regex` `list`", inline=True)
         e3.add_field(name="⭐ Starboard", value=f"`{p}wh starboard enable <name> #ch [threshold]`\n`disable`", inline=True)
         e3.add_field(name="💎 Karma", value=f"`{p}wh karma enable/disable/check/leaderboard`", inline=True)
@@ -3371,6 +4162,35 @@ class Wormhole(commands.Cog):
         e3.add_field(name="👤 Profiles", value=f"`{p}wh profile <name> [@user]`", inline=True)
         e3.add_field(name="📋 Audit", value=f"`{p}wh audit <name> [count]`", inline=True)
         e3.add_field(name="🌐 Global", value=f"`{p}wh global ban-user/unban-user/ban-server/unban-server/list`", inline=True)
-        e3.set_footer(text="Wormhole v3.2.0 • EveCogs • github.com/everestmcarthur/EveCogs")
+        e3.add_field(name="📊 Phase 4", value=(
+            f"`mirror add/remove/list` `poll create/close/list` `afk`\n"
+            f"`ignore add/remove/list` `autoreply add/remove/list`\n"
+            f"`bookmark save/list/clear` `colour` `quiet/quiet-off`\n"
+            f"`analytics` `health` `bridge add/remove/list`"), inline=False)
 
-        await ctx.send(embeds=[e1, e2, e3])
+        e4 = discord.Embed(title="🌀 Commands (4/4) — Phase 5", colour=COLOUR_NEUTRAL)
+        e4.add_field(name="🔔 Mentions (`wh mentions`)", value=(
+            f"`set <name> <users|roles|everyone|here> <bool>`\n"
+            f"`server-set <name> <type> <bool>` — per-server override\n"
+            f"`exempt/unexempt <name> @user` — bypass policy\n"
+            f"`status <name>` — view current policy"), inline=False)
+        e4.add_field(name="📜 Terms of Service (`wh tos`)", value=(
+            f"`enable/disable <name>` — require acceptance\n"
+            f"`set <name> <text>` — custom ToS text\n"
+            f"`template <name>` — reset to legal template\n"
+            f"`accepted <name>` — who accepted\n"
+            f"`reset <name>` — force re-acceptance\n"
+            f"`{p}wh accept/agree <name>` — accept ToS"), inline=False)
+        e4.add_field(name="🚨 Reports (`wh report`)", value=(
+            f"`message [msg_id] [reason]` — report a message\n"
+            f"`list <name> [show_resolved]` — view reports\n"
+            f"`resolve <name> <id>` — resolve a report\n"
+            f"`action <name> <id> <ban|mute|warn|dismiss>`"), inline=False)
+        e4.add_field(name="📱 Context Menus (right-click)", value=(
+            "• **Report to Wormhole** — report a message\n"
+            "• **Wormhole Bookmark** — save a message\n"
+            "• **Wormhole Delete** — delete from network (staff)\n"
+            "• **Wormhole Profile** — view user profile"), inline=False)
+        e4.set_footer(text="Wormhole v3.4.0 • Hybrid commands (slash + prefix) • EveCogs")
+
+        await ctx.send(embeds=[e1, e2, e3, e4])

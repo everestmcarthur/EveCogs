@@ -213,12 +213,28 @@ def generate_invite_code(length: int = 8) -> str:
 # ── Mention sanitisation ───────────────────────────────────────────────────
 
 def sanitise_mentions(content: str, config: dict) -> str:
+    """Legacy mention control — kept for backwards compatibility."""
     if config.get("strip_everyone"):
         content = content.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
     if config.get("strip_role_mentions"):
         content = re.sub(r"<@&(\d+)>", r"@role", content)
     if config.get("strip_user_mentions"):
         content = re.sub(r"<@!?(\d+)>", r"@user", content)
+    return content
+
+
+def apply_mention_policy(content: str, policy: dict, author_id: int, exempt_users: list) -> str:
+    """Apply granular mention policy. If the user is exempt, mentions pass through."""
+    if author_id in exempt_users:
+        return content
+    if not policy.get("allow_everyone", False):
+        content = content.replace("@everyone", "@\u200beveryone")
+    if not policy.get("allow_here", False):
+        content = content.replace("@here", "@\u200bhere")
+    if not policy.get("allow_role_mentions", False):
+        content = re.sub(r"<@&(\d+)>", r"@\u200brole", content)
+    if not policy.get("allow_user_mentions", True):
+        content = re.sub(r"<@!?(\d+)>", r"@\u200buser", content)
     return content
 
 
