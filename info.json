@@ -3,6 +3,6 @@
     "install_msg": "Welcome to **EveCogs**! Use `[p]cog list` to see available cogs.",
     "name": "EveCogs",
     "short": "A collection of advanced cogs for Red-DiscordBot.",
-    "description": "EveCogs is a premium cog repository featuring NexusCore (the ultimate all-in-one server management cog with tickets, applications, suggestions, reaction roles, giveaways, logging, moderation & economy), Wormhole v3.4.0 (cross-server relay with 85+ hybrid commands, context menus, ToS gate, reports, analytics & more), and NewHelpMenu (Components V2 help overhaul).",
+    "description": "EveCogs is a premium cog repository featuring NexusCore (the ultimate all-in-one server management cog with tickets, applications, suggestions, reaction roles, giveaways, logging, moderation & economy), Wormhole v3.4.0 (cross-server relay with 85+ hybrid commands, context menus, ToS gate, reports, analytics & more), NewHelpMenu (Components V2 help overhaul), VoiceMeister (ultimate temporary voice channel system with Join-to-Create, persistent control panel, name templates, game detection & logging), and SelfbotGuard (advanced selfbot detection).",
     "type": "REPO"
 }

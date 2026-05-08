@@ -1,0 +1,32 @@
+{
+    "author": [
+        "everestmcarthur"
+    ],
+    "install_msg": "Thanks for installing **VoiceMeister v1.0.0** — the ultimate temporary voice channel system!\n\n**Quick Start:**\n• `[p]voicemeister setup` — Interactive setup wizard\n• `[p]voicemeister creator add #channel` — Add a Join-to-Create channel\n• `[p]voicemeister panel #channel` — Send the control panel\n• `[p]vc` — User voice channel commands\n\n**Panel Controls:** Lock, Unlock, Hide, Unhide, Rename, User Limit, Kick, Ban, Permit, Reject, Claim, Transfer, Bitrate, Info, Ghost (hide + lock), and Delete.\n\n**Name Templates:** `{user}`, `{game}`, `{count}`, `{custom}`\n\nFull help: `[p]help VoiceMeister`",
+    "name": "VoiceMeister",
+    "disabled": false,
+    "short": "Ultimate temporary voice channels: Join-to-Create, full control panel with buttons, name templates, game detection, logging & more.",
+    "description": "VoiceMeister v1.0.0 is a comprehensive temporary voice channel management system. Features: Join-to-Create channels that auto-spawn personal voice channels, a persistent button control panel (Lock/Unlock, Hide/Unhide, Rename, User Limit, Kick, Ban, Permit, Reject, Claim, Transfer, Bitrate, Info, Ghost, Delete), name templates with {user}/{game}/{count}/{custom} variables, automatic game-activity channel renaming, auto-cleanup when channels empty, logging to a dedicated channel, blacklist/whitelist system, per-user channel limits, cooldowns, default settings per creator, category management, and full slash-compatible hybrid commands. All views are persistent and survive bot restarts.",
+    "tags": [
+        "voice",
+        "voicemeister",
+        "temporary",
+        "jtc",
+        "join-to-create",
+        "voice-channels",
+        "panel",
+        "control",
+        "management",
+        "temp-voice",
+        "dynamic-voice"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores Discord user IDs, guild IDs, and channel IDs for voice channel ownership and settings. Per-user data includes channel ownership, ban/permit lists, and usage cooldowns. Data is cleaned up when channels are deleted.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [
+        3,
+        9,
+        0
+    ],
+    "requirements": []
+}
