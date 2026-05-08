@@ -282,7 +282,15 @@ class _MessageMap:
                 self.reverse[network].pop(_mid, None)
 
     def get_relayed(self, network: str, original_id: int) -> Dict[int, int]:
-        return self.forward.get(network, {}).get(original_id, {})
+        # Try forward map first (original → relayed copies)
+        result = self.forward.get(network, {}).get(original_id, {})
+        if result:
+            return result
+        # If not found, check if it's a relayed ID and resolve to original
+        orig = self.reverse.get(network, {}).get(original_id)
+        if orig:
+            return self.forward.get(network, {}).get(orig, {})
+        return {}
 
     def get_original(self, network: str, relayed_id: int) -> Optional[int]:
         return self.reverse.get(network, {}).get(relayed_id)
@@ -3129,11 +3137,13 @@ class Wormhole(commands.Cog):
     @wh_mod.command(name="edit")
     @commands.guild_only()
     async def wh_mod_edit(self, ctx, name: str, message_id: int, *, new_content: str):
-        """Edit a message across the entire network. Provide the original message ID."""
+        """Edit a message across the entire network. Works with *any* copy's ID (original or relayed)."""
         name = name.lower(); d = await self._net(name)
         if not d: return await ctx.send(embed=err_embed("Not found."))
         if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
-        mapping = self.msg_map.get_relayed(name, message_id)
+        # Resolve: if message_id is a relayed copy, find the original first
+        original_id = self.msg_map.get_original(name, message_id) or message_id
+        mapping = self.msg_map.get_relayed(name, original_id)
         if not mapping:
             return await ctx.send(embed=err_embed("Message not found in relay map. Only recent messages can be edited."))
         mode = d.get("relay_mode", "webhook")
@@ -3153,31 +3163,24 @@ class Wormhole(commands.Cog):
                 edited += 1
             except:
                 pass
-        # Also try editing the original message in the source channel
-        for ch_id in d.get("channels", []):
-            ch = self.bot.get_channel(ch_id)
-            if not ch: continue
-            try:
-                orig = await ch.fetch_message(message_id)
-                # Can't edit other users' messages, but note it in the response
-                break
-            except:
-                pass
         await ctx.send(embed=ok_embed(f"Edited across **{edited}** relayed copies."))
-        await self._audit(name, "mod_edit", ctx.author, details=f"msg={message_id}, edited={edited}")
+        await self._audit(name, "mod_edit", ctx.author, details=f"msg={message_id}, orig={original_id}, edited={edited}")
 
     @wh_mod.command(name="nuke", aliases=["network-delete"])
     @commands.guild_only()
     async def wh_mod_nuke(self, ctx, name: str, message_id: int):
-        """Delete a message from the entire network. Provide the original message ID."""
+        """Delete a message from the entire network. Works with *any* copy's ID (original or relayed)."""
         name = name.lower(); d = await self._net(name)
         if not d: return await ctx.send(embed=err_embed("Not found."))
         if not await self._is_staff(d, ctx.author.id) and not await self.bot.is_owner(ctx.author): return
-        mapping = self.msg_map.get_relayed(name, message_id)
+        # Resolve: if message_id is a relayed copy, find the original first
+        original_id = self.msg_map.get_original(name, message_id) or message_id
+        mapping = self.msg_map.get_relayed(name, original_id)
         if not mapping:
             return await ctx.send(embed=err_embed("Message not found in relay map. Only recent messages can be deleted."))
         mode = d.get("relay_mode", "webhook")
         deleted = 0
+        # Delete all relayed copies
         for ch_id, mid in mapping.items():
             ch = self.bot.get_channel(ch_id)
             if not ch: continue
@@ -3192,19 +3195,31 @@ class Wormhole(commands.Cog):
                 deleted += 1
             except:
                 pass
-        # Also try deleting the original message
+        # Also try deleting the original source message
         for ch_id in d.get("channels", []):
             ch = self.bot.get_channel(ch_id)
             if not ch: continue
             try:
-                orig = await ch.fetch_message(message_id)
+                orig = await ch.fetch_message(original_id)
                 await orig.delete()
                 deleted += 1
                 break
             except:
                 pass
+        # If the provided ID was different from original, also try deleting it directly
+        if message_id != original_id:
+            for ch_id in d.get("channels", []):
+                ch = self.bot.get_channel(ch_id)
+                if not ch: continue
+                try:
+                    msg = await ch.fetch_message(message_id)
+                    await msg.delete()
+                    deleted += 1
+                    break
+                except:
+                    pass
         await ctx.send(embed=ok_embed(f"Deleted from **{deleted}** locations across the network."))
-        await self._audit(name, "mod_network_delete", ctx.author, details=f"msg={message_id}, deleted={deleted}")
+        await self._audit(name, "mod_network_delete", ctx.author, details=f"msg={message_id}, orig={original_id}, deleted={deleted}")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  PHASE 5 — REPORT SYSTEM
