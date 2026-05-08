@@ -314,7 +314,7 @@ class DashboardServer:
         token = _make_token(user_id, secret)
 
         # Redirect to frontend with token
-        base_url = redirect_uri.rsplit("/", 2)[0]  # Remove /api/auth/callback
+        base_url = redirect_uri.rsplit("/api/", 1)[0]  # Remove /api/auth/callback
         resp = web.HTTPFound(f"{base_url}/#/callback?token={token}")
         resp.set_cookie(
             "eve_token", token,
