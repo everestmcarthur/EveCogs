@@ -1,4 +1,6 @@
-"""NexusCore — Ticket system with panels, categories, transcripts, claims, priorities, feedback."""
+"""NexusCore — Ticket system v2: panels, categories, transcripts, claims, priorities,
+feedback, auto-close, tags, staff tracking, archive, reopen, add/remove user, rename,
+custom open/close messages, inactivity timer."""
 
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from redbot.core import Config, commands
 
 from .utils import (
     Clr, ok_embed, err_embed, info_embed, short_id, ts_now, ts_relative,
-    ts_full, duration_str, safe_send, safe_dm, ConfirmView, Paginator, chunk_list,
+    ts_full, duration_str, parse_duration, safe_send, safe_dm, ConfirmView, Paginator, chunk_list,
 )
 
 # ── Defaults ───────────────────────────────────────────────────────────────
@@ -21,10 +23,12 @@ TICKET_DEFAULTS_GUILD = {
     "category_id": None,
     "log_channel": None,
     "transcript_channel": None,
+    "archive_channel": None,
     "counter": 0,
-    "panels": {},        # msg_id -> {channel_id, title, description, colour, categories}
-    "categories": {},    # name -> {description, emoji, roles, questions, greeting, priority, channel_name_fmt}
-    "open_tickets": {},  # channel_id -> {user_id, category, opened_at, claimed_by, priority, closed}
+    "panels": {},
+    "categories": {},
+    "open_tickets": {},
+    "closed_tickets": {},
     "blacklisted": [],
     "max_per_user": 3,
     "auto_close_hours": 0,
@@ -39,12 +43,20 @@ TICKET_DEFAULTS_GUILD = {
     "auto_pin_first": True,
     "allow_rename": True,
     "allow_user_close": True,
+    "allow_reopen": True,
     "transcript_format": "html",
+    "custom_open_msg": "",
+    "custom_close_msg": "",
+    "tags": {},            # tag_name -> {colour, description}
+    "staff_roles": [],
 }
 
 TICKET_DEFAULTS_MEMBER = {
     "tickets_opened": 0,
+    "tickets_closed": 0,
     "feedback_given": [],
+    "avg_response_time": 0,
+    "tickets_claimed": 0,
 }
 
 
@@ -72,6 +84,10 @@ async def build_transcript_html(channel: discord.TextChannel, ticket_info: dict)
         )
 
     msgs_html = "\n".join(messages)
+    tags = ticket_info.get("tags", [])
+    tags_html = " ".join(f'<span class="tag">{t}</span>' for t in tags) if tags else ""
+    claimed = ticket_info.get("claimed_by")
+    claimed_str = f" · Claimed by: {claimed}" if claimed else ""
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Ticket Transcript</title>
 <style>
@@ -79,6 +95,7 @@ body {{ background: #36393f; color: #dcddde; font-family: 'Segoe UI', sans-serif
 .header {{ background: #2f3136; padding: 15px; border-radius: 8px; margin-bottom: 20px; }}
 .header h1 {{ color: #fff; margin: 0; font-size: 1.4em; }}
 .header p {{ color: #72767d; margin: 4px 0 0; }}
+.tag {{ background: #5865f2; color: #fff; padding: 2px 8px; border-radius: 4px; margin-right: 4px; font-size: 0.85em; }}
 .msg {{ display: flex; padding: 8px 16px; }}
 .msg:hover {{ background: #32353b; }}
 .avatar {{ width: 40px; height: 40px; border-radius: 50%; margin-right: 12px; flex-shrink: 0; }}
@@ -90,7 +107,8 @@ a {{ color: #00aff4; }}
 </style></head><body>
 <div class="header">
 <h1>Ticket Transcript — #{ticket_info.get("number", "?")}</h1>
-<p>Category: {ticket_info.get("category", "General")} · Opened by: {ticket_info.get("user_name", "Unknown")} · {ticket_info.get("opened_at_str", "")}</p>
+<p>Category: {ticket_info.get("category", "General")} · Opened by: {ticket_info.get("user_name", "Unknown")} · {ticket_info.get("opened_at_str", "")}{claimed_str}</p>
+{tags_html}
 </div>
 {msgs_html}
 </body></html>"""
@@ -98,8 +116,6 @@ a {{ color: #00aff4; }}
 
 # ── Views ──────────────────────────────────────────────────────────────────
 class TicketPanelView(discord.ui.View):
-    """Persistent panel with a select menu for category or a single create button."""
-
     def __init__(self, cog: "TicketsMixin"):
         super().__init__(timeout=None)
         self.cog = cog
@@ -157,8 +173,7 @@ class CategorySelectView(discord.ui.View):
         for name in cat_names[:25]:
             cd = cats_data.get(name, {})
             options.append(discord.SelectOption(
-                label=name.title(),
-                value=name,
+                label=name.title(), value=name,
                 description=(cd.get("description", "") or "")[:100],
                 emoji=cd.get("emoji") or "🎫",
             ))
@@ -191,8 +206,7 @@ class TicketFormModal(discord.ui.Modal):
             inp = discord.ui.TextInput(
                 label=q[:45],
                 style=discord.TextStyle.paragraph if len(q) > 30 else discord.TextStyle.short,
-                required=True,
-                max_length=1024,
+                required=True, max_length=1024,
             )
             self.inputs.append(inp)
             self.add_item(inp)
@@ -206,8 +220,6 @@ class TicketFormModal(discord.ui.Modal):
 
 
 class TicketControlView(discord.ui.View):
-    """Controls inside a ticket channel: close, claim, priority."""
-
     def __init__(self, cog: "TicketsMixin"):
         super().__init__(timeout=None)
         self.cog = cog
@@ -224,6 +236,15 @@ class TicketControlView(discord.ui.View):
     async def priority_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = PrioritySelectView(self.cog)
         await interaction.response.send_message("Set priority:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Tag", style=discord.ButtonStyle.secondary, emoji="🏷️", custom_id="nexus_ticket_tag")
+    async def tag_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.ticket_config.guild(interaction.guild).all()
+        tags = data.get("tags", {})
+        if not tags:
+            return await interaction.response.send_message("No tags configured.", ephemeral=True)
+        view = TagSelectView(self.cog, tags)
+        await interaction.response.send_message("Apply a tag:", view=view, ephemeral=True)
 
 
 class PrioritySelectView(discord.ui.View):
@@ -247,9 +268,28 @@ class PrioritySelectView(discord.ui.View):
             if ch_id in tickets:
                 tickets[ch_id]["priority"] = prio
         prio_emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴"}
-        await interaction.response.send_message(
-            f"{prio_emoji.get(prio, '⚡')} Priority set to **{prio.title()}**", ephemeral=False
-        )
+        await interaction.response.send_message(f"{prio_emoji.get(prio, '⚡')} Priority set to **{prio.title()}**")
+        self.stop()
+
+
+class TagSelectView(discord.ui.View):
+    def __init__(self, cog, tags: dict):
+        super().__init__(timeout=30)
+        self.cog = cog
+        opts = [discord.SelectOption(label=name.title(), value=name, description=(t.get("description", "") or "")[:100]) for name, t in list(tags.items())[:25]]
+        self.sel = discord.ui.Select(options=opts, placeholder="Tag...")
+        self.sel.callback = self.on_select
+        self.add_item(self.sel)
+
+    async def on_select(self, interaction: discord.Interaction):
+        tag = self.sel.values[0]
+        ch_id = str(interaction.channel.id)
+        async with self.cog.ticket_config.guild(interaction.guild).open_tickets() as tickets:
+            if ch_id in tickets:
+                tickets[ch_id].setdefault("tags", [])
+                if tag not in tickets[ch_id]["tags"]:
+                    tickets[ch_id]["tags"].append(tag)
+        await interaction.response.send_message(f"🏷️ Tag **{tag}** applied!")
         self.stop()
 
 
@@ -258,19 +298,14 @@ class FeedbackModal(discord.ui.Modal):
         super().__init__(title="Ticket Feedback")
         self.cog = cog
         self.channel_id = channel_id
-        self.rating = discord.ui.TextInput(
-            label="Rating (1-5 stars)", placeholder="5", max_length=1, required=True
-        )
-        self.comments = discord.ui.TextInput(
-            label="Comments (optional)", style=discord.TextStyle.paragraph, required=False, max_length=500
-        )
+        self.rating = discord.ui.TextInput(label="Rating (1-5 stars)", placeholder="5", max_length=1, required=True)
+        self.comments = discord.ui.TextInput(label="Comments (optional)", style=discord.TextStyle.paragraph, required=False, max_length=500)
         self.add_item(self.rating)
         self.add_item(self.comments)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            r = int(self.rating.value)
-            r = max(1, min(5, r))
+            r = max(1, min(5, int(self.rating.value)))
         except ValueError:
             r = 5
         stars = "⭐" * r
@@ -287,14 +322,25 @@ class FeedbackModal(discord.ui.Modal):
                 await safe_send(log_ch, embed=e)
 
 
+class FeedbackButtonView(discord.ui.View):
+    def __init__(self, cog, channel_id: str):
+        super().__init__(timeout=3600)
+        self.cog = cog
+        self.channel_id = channel_id
+
+    @discord.ui.button(label="Leave Feedback", style=discord.ButtonStyle.primary, emoji="📝")
+    async def feedback_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = FeedbackModal(self.cog, self.channel_id)
+        await interaction.response.send_modal(modal)
+        self.stop()
+
+
 # ── Mixin ──────────────────────────────────────────────────────────────────
 class TicketsMixin:
-    """Ticket system mixin — mixed into the main NexusCore cog."""
+    """Ticket system mixin — v2 with auto-close, tags, staff tracking, archive, reopen."""
 
     def _init_tickets(self, bot):
-        self.ticket_config = Config.get_conf(
-            None, identifier=900001, cog_name="NexusCoreTickets"
-        )
+        self.ticket_config = Config.get_conf(None, identifier=900001, cog_name="NexusCoreTickets")
         self.ticket_config.register_guild(**TICKET_DEFAULTS_GUILD)
         self.ticket_config.register_member(**TICKET_DEFAULTS_MEMBER)
 
@@ -302,14 +348,76 @@ class TicketsMixin:
         self._ticket_control_view = TicketControlView(self)
         bot.add_view(self._ticket_panel_view)
         bot.add_view(self._ticket_control_view)
+        self._auto_close_tasks = {}
+
+    async def _start_auto_close_loop(self):
+        """Check for inactive tickets to auto-close."""
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    data = await self.ticket_config.guild(guild).all()
+                    hours = data.get("auto_close_hours", 0)
+                    if not hours or not data["enabled"]:
+                        continue
+                    threshold = ts_now() - (hours * 3600)
+                    for ch_id, ticket in list(data["open_tickets"].items()):
+                        if ticket.get("closed"):
+                            continue
+                        last_activity = ticket.get("last_activity", ticket.get("opened_at", 0))
+                        if last_activity < threshold:
+                            channel = guild.get_channel(int(ch_id))
+                            if channel:
+                                await channel.send(embed=discord.Embed(
+                                    description=f"⏰ This ticket will be auto-closed due to {hours}h of inactivity.\nSend a message to keep it open.",
+                                    colour=Clr.TICKET,
+                                ))
+                                # Give 5 min grace
+                                await asyncio.sleep(300)
+                                # Re-check
+                                fresh = await self.ticket_config.guild(guild).open_tickets()
+                                t = fresh.get(ch_id)
+                                if t and not t.get("closed"):
+                                    la = t.get("last_activity", t.get("opened_at", 0))
+                                    if la < threshold:
+                                        async with self.ticket_config.guild(guild).open_tickets() as tickets:
+                                            if ch_id in tickets:
+                                                tickets[ch_id]["closed"] = True
+                                                tickets[ch_id]["closed_at"] = ts_now()
+                                                tickets[ch_id]["closed_by"] = "auto"
+                                        await channel.send(embed=discord.Embed(
+                                            description="🔒 Auto-closed due to inactivity. Deleting in 30s...",
+                                            colour=Clr.ERROR,
+                                        ))
+                                        await asyncio.sleep(30)
+                                        try:
+                                            await channel.delete(reason="Auto-close inactivity")
+                                        except discord.HTTPException:
+                                            pass
+            except Exception:
+                pass
+            await asyncio.sleep(600)  # Check every 10 min
+
+    async def _update_ticket_activity(self, message: discord.Message):
+        """Update last activity timestamp for a ticket channel."""
+        if not message.guild:
+            return
+        ch_id = str(message.channel.id)
+        data = await self.ticket_config.guild(message.guild).open_tickets()
+        if ch_id in data and not data[ch_id].get("closed"):
+            async with self.ticket_config.guild(message.guild).open_tickets() as tickets:
+                if ch_id in tickets:
+                    tickets[ch_id]["last_activity"] = ts_now()
+                    # Track first staff response time
+                    if not tickets[ch_id].get("first_response_at"):
+                        staff_roles = await self.ticket_config.guild(message.guild).staff_roles()
+                        is_staff = message.author.guild_permissions.manage_channels or any(r.id in staff_roles for r in message.author.roles)
+                        if is_staff and message.author.id != tickets[ch_id].get("user_id"):
+                            tickets[ch_id]["first_response_at"] = ts_now()
 
     # ── Internal helpers ───────────────────────────────────────────────────
-    async def _create_ticket_channel(
-        self, interaction: discord.Interaction, category_name: str | None, answers: dict
-    ) -> discord.TextChannel | None:
+    async def _create_ticket_channel(self, interaction, category_name, answers):
         guild = interaction.guild
         conf = self.ticket_config.guild(guild)
-
         counter = await conf.counter()
         counter += 1
         await conf.counter.set(counter)
@@ -321,9 +429,7 @@ class TicketsMixin:
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(
-                view_channel=True, send_messages=True, attach_files=True, embed_links=True
-            ),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True, embed_links=True),
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
         }
         for role_id in cat_data.get("roles", []):
@@ -332,49 +438,39 @@ class TicketsMixin:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
         disc_cat = guild.get_channel(data["category_id"]) if data["category_id"] else None
-
         try:
-            channel = await guild.create_text_channel(
-                ch_name,
-                category=disc_cat,
-                overwrites=overwrites,
-                topic=f"Ticket #{counter} · {interaction.user} · {category_name or 'General'}",
-            )
+            channel = await guild.create_text_channel(ch_name, category=disc_cat, overwrites=overwrites,
+                topic=f"Ticket #{counter} · {interaction.user} · {category_name or 'General'}")
         except discord.HTTPException:
             return None
 
         ticket_info = {
-            "user_id": interaction.user.id,
-            "user_name": str(interaction.user),
+            "user_id": interaction.user.id, "user_name": str(interaction.user),
             "category": category_name or "general",
             "opened_at": ts_now(),
             "opened_at_str": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M"),
-            "number": counter,
-            "claimed_by": None,
+            "number": counter, "claimed_by": None,
             "priority": cat_data.get("default_priority", "medium"),
-            "closed": False,
-            "answers": answers,
+            "closed": False, "answers": answers, "tags": [],
+            "last_activity": ts_now(), "first_response_at": None,
+            "participants": [interaction.user.id],
         }
         async with conf.open_tickets() as tickets:
             tickets[str(channel.id)] = ticket_info
 
-        greeting = cat_data.get("greeting") or f"Welcome, {interaction.user.mention}! A staff member will be with you shortly."
-        prio_emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴"}.get(ticket_info["priority"], "🟡")
+        # Custom or default greeting
+        greeting = data.get("custom_open_msg") or cat_data.get("greeting") or f"Welcome, {interaction.user.mention}! A staff member will be with you shortly."
+        greeting = greeting.replace("{user}", interaction.user.mention).replace("{category}", category_name or "General").replace("{ticket_id}", str(counter))
 
-        embed = discord.Embed(
-            title=f"🎫 Ticket #{counter}",
-            description=greeting,
-            colour=Clr.TICKET,
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
+        prio_emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴"}.get(ticket_info["priority"], "🟡")
+        embed = discord.Embed(title=f"🎫 Ticket #{counter}", description=greeting, colour=Clr.TICKET,
+            timestamp=datetime.datetime.now(datetime.timezone.utc))
         embed.add_field(name="Category", value=category_name or "General", inline=True)
         embed.add_field(name="Priority", value=f"{prio_emoji} {ticket_info['priority'].title()}", inline=True)
         embed.add_field(name="Opened by", value=interaction.user.mention, inline=True)
-
         if answers:
             for q, a in answers.items():
                 embed.add_field(name=q, value=a[:1024], inline=False)
-
         embed.set_footer(text="Use the buttons below to manage this ticket")
 
         msg = await channel.send(embed=embed, view=self._ticket_control_view)
@@ -399,6 +495,8 @@ class TicketsMixin:
                 colour=Clr.TICKET,
             ))
 
+        await self._ticket_member_update(guild, interaction.user, "tickets_opened", 1)
+
         log_ch_id = data["log_channel"]
         if log_ch_id:
             log_ch = guild.get_channel(log_ch_id)
@@ -411,7 +509,11 @@ class TicketsMixin:
 
         return channel
 
-    async def _close_ticket(self, interaction: discord.Interaction):
+    async def _ticket_member_update(self, guild, member, key, increment):
+        current = await getattr(self.ticket_config.member(member), key)()
+        await getattr(self.ticket_config.member(member), key).set(current + increment)
+
+    async def _close_ticket(self, interaction):
         guild = interaction.guild
         ch_id = str(interaction.channel.id)
         data = await self.ticket_config.guild(guild).all()
@@ -420,7 +522,6 @@ class TicketsMixin:
             return await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
         if ticket.get("closed"):
             return await interaction.response.send_message("Already closed.", ephemeral=True)
-
         if not data["allow_user_close"] and interaction.user.id == ticket["user_id"]:
             if not interaction.user.guild_permissions.manage_channels:
                 return await interaction.response.send_message("Only staff can close tickets.", ephemeral=True)
@@ -440,26 +541,34 @@ class TicketsMixin:
                 tickets[ch_id]["closed_at"] = ts_now()
                 tickets[ch_id]["closed_by"] = interaction.user.id
 
+        # Archive to closed_tickets for stats
+        async with self.ticket_config.guild(guild).closed_tickets() as closed:
+            closed[ch_id] = dict(ticket)
+            closed[ch_id]["closed_at"] = ts_now()
+            closed[ch_id]["closed_by"] = interaction.user.id
+
+        # Transcript
         transcript_ch_id = data.get("transcript_channel")
         if transcript_ch_id:
             transcript_ch = guild.get_channel(transcript_ch_id)
             if transcript_ch:
                 html = await build_transcript_html(interaction.channel, ticket)
-                file = discord.File(
-                    io.BytesIO(html.encode()),
-                    filename=f"transcript-{ticket.get('number', 0)}.html"
-                )
-                te = discord.Embed(
-                    title=f"📄 Transcript — Ticket #{ticket.get('number', 0)}",
-                    colour=Clr.TICKET,
-                )
+                file = discord.File(io.BytesIO(html.encode()), filename=f"transcript-{ticket.get('number', 0)}.html")
+                te = discord.Embed(title=f"📄 Transcript — Ticket #{ticket.get('number', 0)}", colour=Clr.TICKET)
                 te.add_field(name="User", value=f"<@{ticket['user_id']}>", inline=True)
                 te.add_field(name="Closed by", value=interaction.user.mention, inline=True)
                 te.add_field(name="Category", value=ticket.get("category", "General"), inline=True)
+                if ticket.get("tags"):
+                    te.add_field(name="Tags", value=", ".join(ticket["tags"]), inline=True)
+                if ticket.get("first_response_at"):
+                    response_time = ticket["first_response_at"] - ticket["opened_at"]
+                    te.add_field(name="First Response", value=duration_str(response_time), inline=True)
                 await safe_send(transcript_ch, embed=te, file=file)
 
+        # Custom close message
+        close_msg = data.get("custom_close_msg") or "🔒 This ticket has been closed."
         if data["dm_on_close"]:
-            user = guild.get_member(ticket["user_id"]) or await guild.fetch_member(ticket["user_id"])
+            user = guild.get_member(ticket["user_id"])
             if user:
                 await safe_dm(user, embed=discord.Embed(
                     description=f"Your ticket **#{ticket.get('number', 0)}** in **{guild.name}** has been closed.",
@@ -469,12 +578,8 @@ class TicketsMixin:
         if data["feedback_enabled"]:
             user = guild.get_member(ticket["user_id"])
             if user:
-                modal = FeedbackModal(self, ch_id)
                 try:
-                    await user.send(
-                        "Please rate your support experience!",
-                        view=FeedbackButtonView(self, ch_id)
-                    )
+                    await user.send("Please rate your support experience!", view=FeedbackButtonView(self, ch_id))
                 except discord.HTTPException:
                     pass
 
@@ -487,17 +592,30 @@ class TicketsMixin:
                 le.add_field(name="Closed by", value=interaction.user.mention, inline=True)
                 await safe_send(log_ch, embed=le)
 
-        await interaction.channel.send(embed=discord.Embed(
-            description="🔒 This ticket has been closed. Deleting in 10 seconds...",
-            colour=Clr.ERROR,
-        ))
+        # Archive channel option (move instead of delete)
+        archive_ch_id = data.get("archive_channel")
+        if archive_ch_id:
+            archive_cat = guild.get_channel(archive_ch_id)
+            if archive_cat and isinstance(archive_cat, discord.CategoryChannel):
+                try:
+                    await interaction.channel.edit(
+                        category=archive_cat,
+                        overwrites={guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False)},
+                        reason="Ticket archived",
+                    )
+                    await interaction.channel.send(embed=discord.Embed(description=close_msg, colour=Clr.ERROR))
+                    return  # Don't delete if archiving
+                except discord.HTTPException:
+                    pass
+
+        await interaction.channel.send(embed=discord.Embed(description=f"{close_msg}\nDeleting in 10 seconds...", colour=Clr.ERROR))
         await asyncio.sleep(10)
         try:
             await interaction.channel.delete(reason=f"Ticket #{ticket.get('number', 0)} closed")
         except discord.HTTPException:
             pass
 
-    async def _claim_ticket(self, interaction: discord.Interaction):
+    async def _claim_ticket(self, interaction):
         guild = interaction.guild
         ch_id = str(interaction.channel.id)
         data = await self.ticket_config.guild(guild).all()
@@ -507,30 +625,102 @@ class TicketsMixin:
         if not data["claim_enabled"]:
             return await interaction.response.send_message("Claim system is disabled.", ephemeral=True)
         if ticket.get("claimed_by"):
-            return await interaction.response.send_message(
-                f"Already claimed by <@{ticket['claimed_by']}>.", ephemeral=True
-            )
+            return await interaction.response.send_message(f"Already claimed by <@{ticket['claimed_by']}>.", ephemeral=True)
 
         async with self.ticket_config.guild(guild).open_tickets() as tickets:
             if ch_id in tickets:
                 tickets[ch_id]["claimed_by"] = interaction.user.id
+        await self._ticket_member_update(guild, interaction.user, "tickets_claimed", 1)
 
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                description=f"🙋 **{interaction.user.display_name}** claimed this ticket.",
-                colour=Clr.SUCCESS,
-            )
-        )
+        await interaction.response.send_message(embed=discord.Embed(
+            description=f"🙋 **{interaction.user.display_name}** claimed this ticket.", colour=Clr.SUCCESS,
+        ))
 
+    async def _reopen_ticket(self, ctx, channel: discord.TextChannel):
+        """Reopen a closed/archived ticket."""
+        ch_id = str(channel.id)
+        data = await self.ticket_config.guild(ctx.guild).all()
+        ticket = data["open_tickets"].get(ch_id)
+        if not ticket or not ticket.get("closed"):
+            return False
+        if not data.get("allow_reopen"):
+            return False
 
-class FeedbackButtonView(discord.ui.View):
-    def __init__(self, cog, channel_id: str):
-        super().__init__(timeout=3600)
-        self.cog = cog
-        self.channel_id = channel_id
+        async with self.ticket_config.guild(ctx.guild).open_tickets() as tickets:
+            if ch_id in tickets:
+                tickets[ch_id]["closed"] = False
+                tickets[ch_id].pop("closed_at", None)
+                tickets[ch_id].pop("closed_by", None)
+                tickets[ch_id]["last_activity"] = ts_now()
 
-    @discord.ui.button(label="Leave Feedback", style=discord.ButtonStyle.primary, emoji="📝")
-    async def feedback_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = FeedbackModal(self.cog, self.channel_id)
-        await interaction.response.send_modal(modal)
-        self.stop()
+        # Restore permissions
+        user = ctx.guild.get_member(ticket["user_id"])
+        if user:
+            await channel.set_permissions(user, view_channel=True, send_messages=True)
+
+        await channel.send(embed=discord.Embed(
+            description=f"🔓 Ticket reopened by {ctx.author.mention}.", colour=Clr.SUCCESS,
+        ))
+        return True
+
+    async def _add_user_to_ticket(self, ctx, user: discord.Member):
+        """Add a user to the current ticket channel."""
+        ch_id = str(ctx.channel.id)
+        data = await self.ticket_config.guild(ctx.guild).open_tickets()
+        if ch_id not in data:
+            return False
+        await ctx.channel.set_permissions(user, view_channel=True, send_messages=True, attach_files=True)
+        async with self.ticket_config.guild(ctx.guild).open_tickets() as tickets:
+            if ch_id in tickets:
+                tickets[ch_id].setdefault("participants", []).append(user.id)
+        await ctx.channel.send(embed=discord.Embed(description=f"➕ {user.mention} added to this ticket.", colour=Clr.SUCCESS))
+        return True
+
+    async def _remove_user_from_ticket(self, ctx, user: discord.Member):
+        """Remove a user from the current ticket channel."""
+        ch_id = str(ctx.channel.id)
+        data = await self.ticket_config.guild(ctx.guild).open_tickets()
+        if ch_id not in data:
+            return False
+        await ctx.channel.set_permissions(user, overwrite=None)
+        async with self.ticket_config.guild(ctx.guild).open_tickets() as tickets:
+            if ch_id in tickets:
+                p = tickets[ch_id].get("participants", [])
+                if user.id in p:
+                    p.remove(user.id)
+        await ctx.channel.send(embed=discord.Embed(description=f"➖ {user.mention} removed from this ticket.", colour=Clr.ERROR))
+        return True
+
+    async def _rename_ticket(self, ctx, new_name: str):
+        """Rename the current ticket channel."""
+        ch_id = str(ctx.channel.id)
+        data = await self.ticket_config.guild(ctx.guild).open_tickets()
+        if ch_id not in data:
+            return False
+        if not data[ch_id].get("closed") and await self.ticket_config.guild(ctx.guild).allow_rename():
+            await ctx.channel.edit(name=new_name)
+            return True
+        return False
+
+    def _get_ticket_stats(self, closed_tickets: dict) -> dict:
+        """Compute aggregate ticket stats."""
+        total = len(closed_tickets)
+        if not total:
+            return {"total": 0}
+        categories = {}
+        total_response = 0
+        response_count = 0
+        for t in closed_tickets.values():
+            cat = t.get("category", "general")
+            categories[cat] = categories.get(cat, 0) + 1
+            frt = t.get("first_response_at")
+            opened = t.get("opened_at", 0)
+            if frt and opened:
+                total_response += frt - opened
+                response_count += 1
+        avg_response = total_response // max(response_count, 1)
+        return {
+            "total": total,
+            "categories": categories,
+            "avg_first_response": duration_str(avg_response) if avg_response else "N/A",
+        }

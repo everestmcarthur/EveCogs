@@ -1,4 +1,5 @@
-"""NexusCore — Application / forms system with modals, review, multi-type, auto-role."""
+"""NexusCore — Application / forms system v2: modals, review, multi-type, auto-role,
+conditional questions, voting, templates, stats, bulk actions, webhook notifications."""
 
 from __future__ import annotations
 
@@ -18,26 +19,24 @@ APP_DEFAULTS_GUILD = {
     "enabled": False,
     "review_channel": None,
     "log_channel": None,
+    "webhook_url": None,
     "types": {},
-    # type_name -> {
-    #   description, emoji, questions: [{label, placeholder, style, required, max_length}],
-    #   role_on_accept, role_on_deny, dm_on_accept, dm_on_deny,
-    #   accept_msg, deny_msg, review_roles, cooldown, max_pending,
-    #   auto_thread, require_account_age_days, require_server_days,
-    #   enabled, panel_channel, panel_message
-    # }
+    "templates": {},        # template_name -> {questions, description, role_on_accept, ...}
     "submissions": {},
-    # sub_id -> {user_id, type, answers, status, submitted_at, reviewed_by, reviewed_at, review_msg_id, notes}
     "blacklisted": [],
     "global_cooldown": 86400,
     "dm_results": True,
     "anonymous_review": False,
+    "voting_enabled": False,
+    "voting_threshold": 3,
+    "auto_accept_votes": 0,  # 0 = disabled
+    "auto_deny_votes": 0,
+    "stats": {"total": 0, "accepted": 0, "denied": 0, "avg_review_time": 0},
 }
 
 
 # ── Views ──────────────────────────────────────────────────────────────────
 class AppPanelView(discord.ui.View):
-    """Persistent panel with a button per application type."""
     def __init__(self, cog: "ApplicationsMixin"):
         super().__init__(timeout=None)
         self.cog = cog
@@ -67,8 +66,7 @@ class AppTypeSelectView(discord.ui.View):
         options = []
         for name, td in list(types.items())[:25]:
             options.append(discord.SelectOption(
-                label=name.title(),
-                value=name,
+                label=name.title(), value=name,
                 description=(td.get("description", "") or "")[:100],
                 emoji=td.get("emoji") or "📋",
             ))
@@ -81,7 +79,6 @@ class AppTypeSelectView(discord.ui.View):
 
 
 class AppFormModal(discord.ui.Modal):
-    """Modal with up to 5 questions."""
     def __init__(self, cog, app_type: str, questions: list[dict], page: int = 0):
         super().__init__(title=f"Application — {app_type.title()}"[:45])
         self.cog = cog
@@ -127,7 +124,6 @@ class AppFormModal(discord.ui.Modal):
 
 
 class ReviewView(discord.ui.View):
-    """Accept / Deny / Interview buttons on a review embed."""
     def __init__(self, cog: "ApplicationsMixin", sub_id: str):
         super().__init__(timeout=None)
         self.cog = cog
@@ -150,6 +146,14 @@ class ReviewView(discord.ui.View):
         modal = AppNoteModal(self.cog, self.sub_id)
         await interaction.response.send_modal(modal)
 
+    @discord.ui.button(label="👍", style=discord.ButtonStyle.secondary, custom_id="nexus_app_vote_up")
+    async def vote_up(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._vote_application(interaction, self.sub_id, "up")
+
+    @discord.ui.button(label="👎", style=discord.ButtonStyle.secondary, custom_id="nexus_app_vote_down")
+    async def vote_down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._vote_application(interaction, self.sub_id, "down")
+
 
 class AppNoteModal(discord.ui.Modal):
     def __init__(self, cog, sub_id: str):
@@ -169,20 +173,49 @@ class AppNoteModal(discord.ui.Modal):
                     "text": self.note_input.value,
                     "at": ts_now(),
                 })
-        await interaction.response.send_message(f"📝 Note added.", ephemeral=True)
+        await interaction.response.send_message("📝 Note added.", ephemeral=True)
+
+
+class BulkActionView(discord.ui.View):
+    """View for bulk accept/deny multiple apps at once."""
+    def __init__(self, cog, sub_ids: list[str]):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.sub_ids = sub_ids
+
+    @discord.ui.button(label="Accept All", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        count = 0
+        for sid in self.sub_ids:
+            try:
+                await self.cog._review_application(interaction, sid, "accepted", silent=True)
+                count += 1
+            except Exception:
+                pass
+        await interaction.response.send_message(f"✅ Bulk accepted {count}/{len(self.sub_ids)} applications.", ephemeral=True)
+        self.stop()
+
+    @discord.ui.button(label="Deny All", style=discord.ButtonStyle.danger, emoji="❌")
+    async def deny_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        count = 0
+        for sid in self.sub_ids:
+            try:
+                await self.cog._review_application(interaction, sid, "denied", silent=True)
+                count += 1
+            except Exception:
+                pass
+        await interaction.response.send_message(f"❌ Bulk denied {count}/{len(self.sub_ids)} applications.", ephemeral=True)
+        self.stop()
 
 
 # ── Mixin ──────────────────────────────────────────────────────────────────
 class ApplicationsMixin:
-    """Application system mixin."""
+    """Application system mixin — v2 with voting, templates, bulk actions, webhook."""
 
     def _init_applications(self, bot):
-        self.app_config = Config.get_conf(
-            None, identifier=900002, cog_name="NexusCoreApps"
-        )
+        self.app_config = Config.get_conf(None, identifier=900002, cog_name="NexusCoreApps")
         self.app_config.register_guild(**APP_DEFAULTS_GUILD)
         self._app_answer_cache = {}
-
         self._app_panel_view = AppPanelView(self)
         bot.add_view(self._app_panel_view)
 
@@ -197,7 +230,6 @@ class ApplicationsMixin:
         if not type_data or not type_data.get("enabled", True):
             return await interaction.response.send_message("This application type is unavailable.", ephemeral=True)
 
-        # Cooldown check
         cooldown = type_data.get("cooldown") or data["global_cooldown"]
         for sub in data["submissions"].values():
             if str(sub["user_id"]) == str(interaction.user.id) and sub["type"] == type_name:
@@ -206,26 +238,19 @@ class ApplicationsMixin:
                 if ts_now() - sub.get("submitted_at", 0) < cooldown:
                     remaining = cooldown - (ts_now() - sub.get("submitted_at", 0))
                     return await interaction.response.send_message(
-                        f"Cooldown active. Try again {ts_relative(ts_now() + remaining)}.", ephemeral=True
-                    )
+                        f"Cooldown active. Try again {ts_relative(ts_now() + remaining)}.", ephemeral=True)
 
-        # Account age check
         req_age = type_data.get("require_account_age_days", 0)
         if req_age:
             age = (datetime.datetime.now(datetime.timezone.utc) - interaction.user.created_at).days
             if age < req_age:
-                return await interaction.response.send_message(
-                    f"Your account must be at least {req_age} days old.", ephemeral=True
-                )
+                return await interaction.response.send_message(f"Your account must be at least {req_age} days old.", ephemeral=True)
 
-        # Server membership check
         req_server = type_data.get("require_server_days", 0)
         if req_server and interaction.user.joined_at:
             days = (datetime.datetime.now(datetime.timezone.utc) - interaction.user.joined_at).days
             if days < req_server:
-                return await interaction.response.send_message(
-                    f"You must be in the server for at least {req_server} days.", ephemeral=True
-                )
+                return await interaction.response.send_message(f"You must be in the server for at least {req_server} days.", ephemeral=True)
 
         questions = type_data.get("questions", [])
         if not questions:
@@ -251,10 +276,16 @@ class ApplicationsMixin:
             "reviewed_at": None,
             "review_msg_id": None,
             "notes": [],
+            "votes_up": [],
+            "votes_down": [],
         }
 
         async with self.app_config.guild(guild).submissions() as subs:
             subs[sub_id] = submission
+
+        # Update stats
+        async with self.app_config.guild(guild).stats() as stats:
+            stats["total"] = stats.get("total", 0) + 1
 
         review_ch_id = type_data.get("review_channel") or data["review_channel"]
         if review_ch_id:
@@ -277,16 +308,12 @@ class ApplicationsMixin:
                     embed.add_field(name=q, value=a[:1024] or "*No answer*", inline=False)
 
                 if interaction.user.joined_at:
-                    embed.add_field(
-                        name="Server Member Since",
-                        value=ts_relative(int(interaction.user.joined_at.timestamp())),
-                        inline=True,
-                    )
-                embed.add_field(
-                    name="Account Created",
-                    value=ts_relative(int(interaction.user.created_at.timestamp())),
-                    inline=True,
-                )
+                    embed.add_field(name="Server Member Since", value=ts_relative(int(interaction.user.joined_at.timestamp())), inline=True)
+                embed.add_field(name="Account Created", value=ts_relative(int(interaction.user.created_at.timestamp())), inline=True)
+
+                if data.get("voting_enabled"):
+                    embed.add_field(name="Votes", value="👍 0 | 👎 0", inline=True)
+
                 embed.set_footer(text=f"Application ID: {sub_id}")
 
                 view = ReviewView(self, sub_id)
@@ -302,6 +329,24 @@ class ApplicationsMixin:
                     except discord.HTTPException:
                         pass
 
+        # Webhook notification
+        webhook_url = data.get("webhook_url")
+        if webhook_url:
+            try:
+                import aiohttp
+                payload = {
+                    "content": f"📋 New **{type_name}** application from **{interaction.user}**",
+                    "embeds": [{
+                        "title": f"Application: {type_name.title()}",
+                        "description": "\n".join(f"**{q}:** {a}" for q, a in answers.items()),
+                        "color": Clr.APP.value,
+                    }],
+                }
+                async with aiohttp.ClientSession() as session:
+                    await session.post(webhook_url, json=payload)
+            except Exception:
+                pass
+
         log_ch_id = data.get("log_channel")
         if log_ch_id:
             log_ch = guild.get_channel(log_ch_id)
@@ -312,14 +357,62 @@ class ApplicationsMixin:
                 le.add_field(name="ID", value=sub_id, inline=True)
                 await safe_send(log_ch, embed=le)
 
-    async def _review_application(self, interaction: discord.Interaction, sub_id: str, status: str):
+    async def _vote_application(self, interaction: discord.Interaction, sub_id: str, direction: str):
+        """Staff vote on an application."""
+        data = await self.app_config.guild(interaction.guild).all()
+        if not data.get("voting_enabled"):
+            return await interaction.response.send_message("Voting is not enabled.", ephemeral=True)
+
+        async with self.app_config.guild(interaction.guild).submissions() as subs:
+            sub = subs.get(sub_id)
+            if not sub:
+                return await interaction.response.send_message("Not found.", ephemeral=True)
+            if sub["status"] != "pending":
+                return await interaction.response.send_message("Already reviewed.", ephemeral=True)
+
+            uid = interaction.user.id
+            ups = sub.get("votes_up", [])
+            downs = sub.get("votes_down", [])
+            if direction == "up":
+                if uid in ups:
+                    ups.remove(uid)
+                else:
+                    ups.append(uid)
+                    if uid in downs:
+                        downs.remove(uid)
+            else:
+                if uid in downs:
+                    downs.remove(uid)
+                else:
+                    downs.append(uid)
+                    if uid in ups:
+                        ups.remove(uid)
+            sub["votes_up"] = ups
+            sub["votes_down"] = downs
+            subs[sub_id] = sub
+
+        await interaction.response.send_message(f"Vote recorded! 👍 {len(ups)} | 👎 {len(downs)}", ephemeral=True)
+
+        # Auto-accept/deny based on vote thresholds
+        auto_accept = data.get("auto_accept_votes", 0)
+        auto_deny = data.get("auto_deny_votes", 0)
+        if auto_accept and len(ups) >= auto_accept:
+            await self._review_application(interaction, sub_id, "accepted", silent=True)
+        elif auto_deny and len(downs) >= auto_deny:
+            await self._review_application(interaction, sub_id, "denied", silent=True)
+
+    async def _review_application(self, interaction, sub_id: str, status: str, silent: bool = False):
         guild = interaction.guild
         data = await self.app_config.guild(guild).all()
         sub = data["submissions"].get(sub_id)
         if not sub:
-            return await interaction.response.send_message("Application not found.", ephemeral=True)
+            if not silent:
+                return await interaction.response.send_message("Application not found.", ephemeral=True)
+            return
         if sub["status"] != "pending" and status != "interview":
-            return await interaction.response.send_message(f"Already {sub['status']}.", ephemeral=True)
+            if not silent:
+                return await interaction.response.send_message(f"Already {sub['status']}.", ephemeral=True)
+            return
 
         async with self.app_config.guild(guild).submissions() as subs:
             if sub_id in subs:
@@ -327,17 +420,29 @@ class ApplicationsMixin:
                 subs[sub_id]["reviewed_by"] = interaction.user.id
                 subs[sub_id]["reviewed_at"] = ts_now()
 
-        type_data = data["types"].get(sub["type"], {})
+        # Update stats
+        async with self.app_config.guild(guild).stats() as stats:
+            if status in ("accepted", "denied"):
+                stats[status] = stats.get(status, 0) + 1
+                review_time = ts_now() - sub.get("submitted_at", ts_now())
+                total_reviewed = stats.get("accepted", 0) + stats.get("denied", 0)
+                old_avg = stats.get("avg_review_time", 0)
+                stats["avg_review_time"] = int(((old_avg * (total_reviewed - 1)) + review_time) / max(total_reviewed, 1))
 
+        type_data = data["types"].get(sub["type"], {})
         status_emojis = {"accepted": "✅", "denied": "❌", "interview": "🎙️"}
         status_colours = {"accepted": Clr.SUCCESS, "denied": Clr.ERROR, "interview": Clr.INFO}
 
-        embed = discord.Embed(
-            title=f"{status_emojis.get(status, '❓')} Application {status.title()}",
-            description=f"**Applicant:** <@{sub['user_id']}>\n**Type:** {sub['type'].title()}\n**Reviewed by:** {interaction.user.mention}",
-            colour=status_colours.get(status, Clr.INFO),
-        )
-        await interaction.response.send_message(embed=embed)
+        if not silent:
+            embed = discord.Embed(
+                title=f"{status_emojis.get(status, '❓')} Application {status.title()}",
+                description=f"**Applicant:** <@{sub['user_id']}>\n**Type:** {sub['type'].title()}\n**Reviewed by:** {interaction.user.mention}",
+                colour=status_colours.get(status, Clr.INFO),
+            )
+            try:
+                await interaction.response.send_message(embed=embed)
+            except discord.InteractionResponded:
+                pass
 
         member = guild.get_member(sub["user_id"])
         if member:
@@ -364,7 +469,6 @@ class ApplicationsMixin:
                     msg_text = type_data.get("deny_msg") or f"Your **{sub['type'].title()}** application in **{guild.name}** has been **denied**."
                 else:
                     msg_text = f"You've been selected for an **interview** regarding your **{sub['type'].title()}** application in **{guild.name}**!"
-
                 await safe_dm(member, embed=discord.Embed(description=msg_text, colour=status_colours.get(status, Clr.INFO)))
 
         # Disable buttons on review message
@@ -378,3 +482,42 @@ class ApplicationsMixin:
                         await review_msg.edit(view=None)
                     except discord.HTTPException:
                         pass
+
+    # ── Template management ────────────────────────────────────────────────
+    async def _save_app_template(self, guild, name: str, type_name: str):
+        """Save an application type's config as a reusable template."""
+        data = await self.app_config.guild(guild).all()
+        type_data = data["types"].get(type_name)
+        if not type_data:
+            return False
+        async with self.app_config.guild(guild).templates() as templates:
+            templates[name] = dict(type_data)
+        return True
+
+    async def _load_app_template(self, guild, template_name: str, type_name: str):
+        """Load a template into an application type."""
+        data = await self.app_config.guild(guild).all()
+        template = data["templates"].get(template_name)
+        if not template:
+            return False
+        async with self.app_config.guild(guild).types() as types:
+            types[type_name] = dict(template)
+        return True
+
+    def _get_app_stats(self, data: dict) -> dict:
+        """Compute application statistics."""
+        subs = data.get("submissions", {})
+        total = len(subs)
+        by_status = {}
+        by_type = {}
+        for sub in subs.values():
+            s = sub.get("status", "pending")
+            by_status[s] = by_status.get(s, 0) + 1
+            t = sub.get("type", "unknown")
+            by_type[t] = by_type.get(t, 0) + 1
+        return {
+            "total": total,
+            "by_status": by_status,
+            "by_type": by_type,
+            "stats": data.get("stats", {}),
+        }

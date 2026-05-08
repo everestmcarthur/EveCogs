@@ -1,4 +1,5 @@
-"""NexusCore — Suggestion system with voting, statuses, threads, anonymous mode."""
+"""NexusCore — Suggestion system v2: voting, statuses, threads, anonymous, edit by author,
+merge duplicates, tags, polls, stats, auto-approve threshold, staff responses."""
 
 from __future__ import annotations
 
@@ -23,9 +24,8 @@ SUGGEST_DEFAULTS_GUILD = {
     "implemented_channel": None,
     "counter": 0,
     "suggestions": {},
-    # id -> {user_id, content, status, upvotes, downvotes, submitted_at,
-    #        message_id, staff_response, anonymous, image_url, category, thread_id}
     "categories": [],
+    "tags": [],                   # pre-defined tags
     "anonymous_allowed": True,
     "auto_thread": True,
     "auto_upvote": True,
@@ -41,6 +41,10 @@ SUGGEST_DEFAULTS_GUILD = {
     "allow_images": True,
     "voting_buttons": True,
     "staff_roles": [],
+    "allow_edit": True,
+    "edit_window": 300,           # seconds user can edit after submission
+    "auto_approve_threshold": 0,  # auto-approve at N upvotes (0=disabled)
+    "auto_deny_threshold": 0,
 }
 
 STATUS_MAP = {
@@ -52,6 +56,8 @@ STATUS_MAP = {
     "in_progress": ("🔨", "In Progress", discord.Colour(0xE67E22)),
     "duplicate": ("♻️", "Duplicate", discord.Colour(0x95A5A6)),
     "invalid": ("🚫", "Invalid", discord.Colour(0x7F8C8D)),
+    "planned": ("📅", "Planned", discord.Colour(0x3498DB)),
+    "on_hold": ("⏸️", "On Hold", discord.Colour(0xBDC3C7)),
 }
 
 
@@ -78,19 +84,12 @@ class SuggestModal(discord.ui.Modal):
         self.category = category
         self.anonymous = anonymous
         self.suggestion_input = discord.ui.TextInput(
-            label="Your Suggestion",
-            style=discord.TextStyle.paragraph,
-            placeholder="Describe your idea in detail...",
-            min_length=10,
-            max_length=2000,
-            required=True,
+            label="Your Suggestion", style=discord.TextStyle.paragraph,
+            placeholder="Describe your idea in detail...", min_length=10, max_length=2000, required=True,
         )
         self.image_input = discord.ui.TextInput(
-            label="Image URL (optional)",
-            style=discord.TextStyle.short,
-            placeholder="https://...",
-            required=False,
-            max_length=500,
+            label="Image URL (optional)", style=discord.TextStyle.short,
+            placeholder="https://...", required=False, max_length=500,
         )
         self.add_item(self.suggestion_input)
         self.add_item(self.image_input)
@@ -98,13 +97,26 @@ class SuggestModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         await self.cog._create_suggestion(
-            interaction,
-            self.suggestion_input.value,
-            category=self.category,
-            anonymous=self.anonymous,
+            interaction, self.suggestion_input.value,
+            category=self.category, anonymous=self.anonymous,
             image_url=self.image_input.value or None,
         )
         await interaction.followup.send("✅ Suggestion submitted!", ephemeral=True)
+
+
+class EditSuggestionModal(discord.ui.Modal):
+    def __init__(self, cog, suggestion_id: str, current_content: str):
+        super().__init__(title=f"Edit Suggestion #{suggestion_id}")
+        self.cog = cog
+        self.suggestion_id = suggestion_id
+        self.content = discord.ui.TextInput(
+            label="Updated suggestion", style=discord.TextStyle.paragraph,
+            default=current_content, min_length=10, max_length=2000,
+        )
+        self.add_item(self.content)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._edit_suggestion(interaction, self.suggestion_id, self.content.value)
 
 
 class SuggestPanelView(discord.ui.View):
@@ -117,15 +129,12 @@ class SuggestPanelView(discord.ui.View):
         data = await self.cog.suggest_config.guild(interaction.guild).all()
         if not data["enabled"]:
             return await interaction.response.send_message("Suggestions are disabled.", ephemeral=True)
-
         if str(interaction.user.id) in [str(x) for x in data["blacklisted"]]:
             return await interaction.response.send_message("You are blacklisted from suggestions.", ephemeral=True)
-
         cats = data["categories"]
         if cats and data["require_category"]:
             view = SuggestCategoryView(self.cog, cats)
             return await interaction.response.send_message("Choose a category:", view=view, ephemeral=True)
-
         modal = SuggestModal(self.cog)
         await interaction.response.send_modal(modal)
 
@@ -156,10 +165,7 @@ class StatusSelectView(discord.ui.View):
     def __init__(self, cog, suggestion_id: str):
         super().__init__(timeout=60)
         self.cog = cog
-        options = [
-            discord.SelectOption(label=v[1], value=k, emoji=v[0])
-            for k, v in STATUS_MAP.items()
-        ]
+        options = [discord.SelectOption(label=v[1], value=k, emoji=v[0]) for k, v in STATUS_MAP.items()]
         self.sel = discord.ui.Select(placeholder="Set status...", options=options)
         self.sel.callback = self.on_select
         self.add_item(self.sel)
@@ -171,14 +177,11 @@ class StatusSelectView(discord.ui.View):
 
 # ── Mixin ──────────────────────────────────────────────────────────────────
 class SuggestionsMixin:
-    """Suggestion system mixin."""
+    """Suggestion system mixin — v2 with edit, merge, tags, stats, auto-approve."""
 
     def _init_suggestions(self, bot):
-        self.suggest_config = Config.get_conf(
-            None, identifier=900003, cog_name="NexusCoreSuggestions"
-        )
+        self.suggest_config = Config.get_conf(None, identifier=900003, cog_name="NexusCoreSuggestions")
         self.suggest_config.register_guild(**SUGGEST_DEFAULTS_GUILD)
-
         self._suggest_panel_view = SuggestPanelView(self)
         bot.add_view(self._suggest_panel_view)
 
@@ -201,18 +204,14 @@ class SuggestionsMixin:
         emoji, label, colour = STATUS_MAP["pending"]
 
         embed = discord.Embed(
-            title=f"Suggestion #{counter}",
-            description=content,
-            colour=colour,
+            title=f"Suggestion #{counter}", description=content, colour=colour,
             timestamp=datetime.datetime.now(datetime.timezone.utc),
         )
         if anonymous:
             embed.set_author(name="Anonymous")
         else:
-            embed.set_author(
-                name=str(interaction.user),
-                icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None,
-            )
+            embed.set_author(name=str(interaction.user),
+                icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
 
         if category:
             embed.add_field(name="Category", value=category.title(), inline=True)
@@ -221,7 +220,6 @@ class SuggestionsMixin:
 
         if image_url:
             embed.set_image(url=image_url)
-
         embed.set_footer(text=f"ID: {s_id}")
 
         if data["voting_buttons"]:
@@ -251,10 +249,14 @@ class SuggestionsMixin:
             "submitted_at": ts_now(),
             "message_id": msg.id,
             "staff_response": None,
+            "staff_responses": [],
             "anonymous": anonymous,
             "image_url": image_url,
             "category": category,
             "thread_id": thread_id,
+            "tags": [],
+            "edit_history": [],
+            "merged_with": None,
         }
         async with conf.suggestions() as subs:
             subs[s_id] = suggestion
@@ -289,11 +291,9 @@ class SuggestionsMixin:
             s["downvotes"] = downs
             subs[suggestion_id] = s
 
-        await interaction.response.send_message(
-            f"Vote recorded! 👍 {len(ups)} | 👎 {len(downs)}", ephemeral=True
-        )
+        await interaction.response.send_message(f"Vote recorded! 👍 {len(ups)} | 👎 {len(downs)}", ephemeral=True)
 
-        # Update the embed
+        # Update embed
         data = await conf.all()
         channel = interaction.guild.get_channel(data["channel"])
         if channel and s.get("message_id"):
@@ -308,14 +308,120 @@ class SuggestionsMixin:
             except discord.HTTPException:
                 pass
 
-    async def _set_status(self, interaction: discord.Interaction, suggestion_id: str, status: str):
-        guild = interaction.guild
-        conf = self.suggest_config.guild(guild)
-        data = await conf.all()
+        # Auto-approve/deny
+        auto_approve = data.get("auto_approve_threshold", 0)
+        auto_deny = data.get("auto_deny_threshold", 0)
+        if auto_approve and len(ups) >= auto_approve and s.get("status") == "pending":
+            class _FI:
+                guild = interaction.guild
+                user = interaction.guild.me
+                response = type("R", (), {"send_message": lambda s, *a, **k: None})()
+            await self._set_status(_FI(), suggestion_id, "approved")
+        elif auto_deny and len(downs) >= auto_deny and s.get("status") == "pending":
+            class _FI:
+                guild = interaction.guild
+                user = interaction.guild.me
+                response = type("R", (), {"send_message": lambda s, *a, **k: None})()
+            await self._set_status(_FI(), suggestion_id, "denied")
 
+    async def _edit_suggestion(self, interaction, suggestion_id: str, new_content: str):
+        """Allow the original author to edit within the edit window."""
+        conf = self.suggest_config.guild(interaction.guild)
+        data = await conf.all()
         s = data["suggestions"].get(suggestion_id)
         if not s:
             return await interaction.response.send_message("Not found.", ephemeral=True)
+        if s["user_id"] != interaction.user.id:
+            return await interaction.response.send_message("You can only edit your own suggestions.", ephemeral=True)
+        if not data.get("allow_edit"):
+            return await interaction.response.send_message("Editing is disabled.", ephemeral=True)
+        window = data.get("edit_window", 300)
+        if ts_now() - s["submitted_at"] > window:
+            return await interaction.response.send_message(f"Edit window ({window}s) has passed.", ephemeral=True)
+
+        async with conf.suggestions() as subs:
+            if suggestion_id in subs:
+                subs[suggestion_id]["edit_history"].append({
+                    "old": subs[suggestion_id]["content"],
+                    "edited_at": ts_now(),
+                })
+                subs[suggestion_id]["content"] = new_content
+
+        # Update embed
+        channel = interaction.guild.get_channel(data["channel"])
+        if channel and s.get("message_id"):
+            try:
+                msg = await channel.fetch_message(s["message_id"])
+                if msg.embeds:
+                    embed = msg.embeds[0]
+                    embed.description = new_content
+                    embed.set_footer(text=f"ID: {suggestion_id} · Edited")
+                    await msg.edit(embed=embed)
+            except discord.HTTPException:
+                pass
+
+        await interaction.response.send_message("✅ Suggestion updated.", ephemeral=True)
+
+    async def _merge_suggestions(self, guild, target_id: str, source_id: str) -> bool:
+        """Merge source suggestion into target."""
+        conf = self.suggest_config.guild(guild)
+        data = await conf.all()
+        target = data["suggestions"].get(target_id)
+        source = data["suggestions"].get(source_id)
+        if not target or not source:
+            return False
+
+        async with conf.suggestions() as subs:
+            # Merge votes (no duplicates)
+            for uid in source.get("upvotes", []):
+                if uid not in subs[target_id].get("upvotes", []):
+                    subs[target_id].setdefault("upvotes", []).append(uid)
+            for uid in source.get("downvotes", []):
+                if uid not in subs[target_id].get("downvotes", []):
+                    subs[target_id].setdefault("downvotes", []).append(uid)
+            subs[source_id]["status"] = "duplicate"
+            subs[source_id]["merged_with"] = target_id
+
+        # Update source embed
+        channel = guild.get_channel(data["channel"])
+        if channel and source.get("message_id"):
+            try:
+                msg = await channel.fetch_message(source["message_id"])
+                if msg.embeds:
+                    embed = msg.embeds[0]
+                    embed.colour = discord.Colour(0x95A5A6)
+                    for i, field in enumerate(embed.fields):
+                        if field.name == "Status":
+                            embed.set_field_at(i, name="Status", value="♻️ Duplicate (merged)", inline=True)
+                    embed.add_field(name="Merged into", value=f"Suggestion #{target_id}", inline=True)
+                    await msg.edit(embed=embed)
+            except discord.HTTPException:
+                pass
+        return True
+
+    async def _tag_suggestion(self, guild, suggestion_id: str, tag: str) -> bool:
+        """Add a tag to a suggestion."""
+        conf = self.suggest_config.guild(guild)
+        async with conf.suggestions() as subs:
+            s = subs.get(suggestion_id)
+            if not s:
+                return False
+            s.setdefault("tags", [])
+            if tag not in s["tags"]:
+                s["tags"].append(tag)
+            subs[suggestion_id] = s
+        return True
+
+    async def _set_status(self, interaction, suggestion_id: str, status: str):
+        guild = interaction.guild
+        conf = self.suggest_config.guild(guild)
+        data = await conf.all()
+        s = data["suggestions"].get(suggestion_id)
+        if not s:
+            try:
+                return await interaction.response.send_message("Not found.", ephemeral=True)
+            except Exception:
+                return
 
         async with conf.suggestions() as subs:
             if suggestion_id in subs:
@@ -337,11 +443,12 @@ class SuggestionsMixin:
             except discord.HTTPException:
                 pass
 
-        await interaction.response.send_message(
-            embed=ok_embed(f"Suggestion #{suggestion_id} → **{emoji} {label}**")
-        )
+        try:
+            await interaction.response.send_message(embed=ok_embed(f"Suggestion #{suggestion_id} → **{emoji} {label}**"))
+        except Exception:
+            pass
 
-        # Move to status-specific channel if set
+        # Move to status channel if set
         move_map = {
             "approved": data.get("approved_channel"),
             "denied": data.get("denied_channel"),
@@ -369,3 +476,26 @@ class SuggestionsMixin:
                     description=f"Your suggestion **#{suggestion_id}** in **{guild.name}** has been updated to: {emoji} **{label}**",
                     colour=colour,
                 ))
+
+    def _get_suggestion_stats(self, data: dict) -> dict:
+        """Compute suggestion statistics."""
+        subs = data.get("suggestions", {})
+        total = len(subs)
+        by_status = {}
+        by_category = {}
+        total_upvotes = 0
+        total_downvotes = 0
+        for s in subs.values():
+            st = s.get("status", "pending")
+            by_status[st] = by_status.get(st, 0) + 1
+            cat = s.get("category") or "uncategorized"
+            by_category[cat] = by_category.get(cat, 0) + 1
+            total_upvotes += len(s.get("upvotes", []))
+            total_downvotes += len(s.get("downvotes", []))
+        return {
+            "total": total,
+            "by_status": by_status,
+            "by_category": by_category,
+            "total_upvotes": total_upvotes,
+            "total_downvotes": total_downvotes,
+        }

@@ -1,6 +1,9 @@
-"""NexusCore — The ultimate all-in-one server management cog for Red-DiscordBot.
+"""NexusCore v2.0.0 — The ultimate all-in-one Red-DiscordBot cog.
 
-Tickets · Applications · Suggestions · Reaction Roles · Giveaways · Logging · Moderation · Economy
+Modules: Tickets, Applications, Suggestions, Reaction Roles, Giveaways,
+Server Logging, Moderation, Economy, Embed Builder, Dashboard Integration.
+
+100+ commands, persistent views, background tasks, full dashboard support.
 """
 
 from __future__ import annotations
@@ -10,21 +13,24 @@ import datetime
 from typing import Optional
 
 import discord
-from redbot.core import Config, checks, commands
+from redbot.core import Config, commands, checks
 from redbot.core.bot import Red
 
 from .utils import (
     Clr, ok_embed, err_embed, info_embed, short_id, ts_now, ts_relative,
-    duration_str, parse_duration, safe_send, Paginator, chunk_list, ConfirmView,
+    ts_full, duration_str, parse_duration, safe_send, safe_dm,
+    ConfirmView, Paginator, chunk_list,
 )
 from .tickets import TicketsMixin
 from .applications import ApplicationsMixin
 from .suggestions import SuggestionsMixin
 from .reactionroles import ReactionRolesMixin
 from .giveaways import GiveawaysMixin
-from .serverlog import ServerLogMixin
+from .serverlog import ServerLogMixin, EVENT_TYPES
 from .moderation import ModerationMixin
-from .economy import EconomyMixin, ShopView
+from .economy import EconomyMixin, ShopView, new_deck, bj_value, card_str
+from .embedbuilder import EmbedBuilderMixin
+from .dashboard_integration import DashboardMixin
 
 
 class NexusCore(
@@ -36,43 +42,44 @@ class NexusCore(
     ServerLogMixin,
     ModerationMixin,
     EconomyMixin,
+    EmbedBuilderMixin,
+    DashboardMixin,
     commands.Cog,
 ):
-    """🔥 NexusCore — The ultimate server management cog.
+    """🔮 NexusCore — All-in-one server management mega-cog."""
 
-    Tickets, Applications, Suggestions, Reaction Roles, Giveaways,
-    Logging, Moderation, and Economy all in one powerful package.
-    """
-
-    __version__ = "1.0.0"
-    __author__ = "everestmcarthur"
+    __version__ = "2.0.0"
+    __author__ = "EveCogs"
 
     def __init__(self, bot: Red):
         self.bot = bot
-        super().__init__()
-
-        # Initialise all subsystem configs
         self._init_tickets(bot)
         self._init_applications(bot)
         self._init_suggestions(bot)
         self._init_reaction_roles(bot)
         self._init_giveaways(bot)
-        self._init_logging(bot)
+        self._init_serverlog(bot)
         self._init_moderation(bot)
         self._init_economy(bot)
+        self._init_embed_builder(bot)
+        try:
+            self._init_dashboard(bot)
+        except Exception:
+            pass
 
     async def cog_load(self):
+        self._bg_tasks = []
+        self._bg_tasks.append(asyncio.create_task(self._start_auto_close_loop()))
+        self._bg_tasks.append(asyncio.create_task(self._start_gw_loop()))
+        self._bg_tasks.append(asyncio.create_task(self._warning_decay_loop()))
+        self._bg_tasks.append(asyncio.create_task(self._income_role_loop()))
+        self._bg_tasks.append(asyncio.create_task(self._scheduled_embed_loop()))
         await self._load_rr_panels()
-        await self._load_giveaways()
-        # Cache invites for logging
         for guild in self.bot.guilds:
             await self._cache_invites(guild)
 
-    def cog_unload(self):
-        # Cancel giveaway tasks
-        for task in self._gw_tasks.values():
-            task.cancel()
-        for task in self._rr_temp_tasks.values():
+    async def cog_unload(self):
+        for task in self._bg_tasks:
             task.cancel()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -81,31 +88,40 @@ class NexusCore(
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not message.guild or message.author.bot:
+        if message.author.bot or not message.guild:
             return
-        await self._cache_message(message)
+        await self._update_ticket_activity(message)
         await self._check_automod(message)
-
-    @commands.Cog.listener()
-    async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        await self._log_message_edit(before, after)
+        self._cache_message(message)
 
     @commands.Cog.listener()
     async def on_message_delete(self, message: discord.Message):
+        if message.author.bot:
+            return
         await self._log_message_delete(message)
 
     @commands.Cog.listener()
-    async def on_bulk_message_delete(self, messages: list[discord.Message]):
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        if after.author.bot:
+            return
+        await self._log_message_edit(before, after)
+
+    @commands.Cog.listener()
+    async def on_bulk_message_delete(self, messages):
         await self._log_bulk_delete(messages)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         await self._log_member_join(member)
-        await self._check_anti_raid(member)
+        await self._check_raid(member)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         await self._log_member_leave(member)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        await self._log_member_update(before, after)
 
     @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.User):
@@ -116,42 +132,56 @@ class NexusCore(
         await self._log_member_unban(guild, user)
 
     @commands.Cog.listener()
-    async def on_member_update(self, before: discord.Member, after: discord.Member):
-        await self._log_member_update(before, after)
-
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        await self._log_voice(member, before, after)
-
-    @commands.Cog.listener()
-    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
+    async def on_guild_channel_create(self, channel):
         await self._log_channel_create(channel)
 
     @commands.Cog.listener()
-    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
+    async def on_guild_channel_delete(self, channel):
         await self._log_channel_delete(channel)
-        if channel.guild:
-            # Anti-nuke check
-            try:
-                async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
-                    if entry.user:
-                        await self._check_anti_nuke(channel.guild, "channel_delete", entry.user)
-            except discord.HTTPException:
-                pass
 
     @commands.Cog.listener()
-    async def on_guild_role_create(self, role: discord.Role):
+    async def on_guild_channel_update(self, before, after):
+        await self._log_channel_update(before, after)
+
+    @commands.Cog.listener()
+    async def on_guild_role_create(self, role):
         await self._log_role_create(role)
 
     @commands.Cog.listener()
-    async def on_guild_role_delete(self, role: discord.Role):
+    async def on_guild_role_delete(self, role):
         await self._log_role_delete(role)
-        try:
-            async for entry in role.guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
-                if entry.user:
-                    await self._check_anti_nuke(role.guild, "role_delete", entry.user)
-        except discord.HTTPException:
-            pass
+
+    @commands.Cog.listener()
+    async def on_guild_role_update(self, before, after):
+        await self._log_role_update(before, after)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        await self._log_voice_update(member, before, after)
+
+    @commands.Cog.listener()
+    async def on_invite_create(self, invite):
+        await self._log_invite_create(invite)
+
+    @commands.Cog.listener()
+    async def on_invite_delete(self, invite):
+        await self._log_invite_delete(invite)
+
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread):
+        await self._log_thread_create(thread)
+
+    @commands.Cog.listener()
+    async def on_thread_delete(self, thread):
+        await self._log_thread_delete(thread)
+
+    @commands.Cog.listener()
+    async def on_thread_update(self, before, after):
+        await self._log_thread_update(before, after)
+
+    @commands.Cog.listener()
+    async def on_guild_update(self, before, after):
+        await self._log_guild_update(before, after)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -164,222 +194,293 @@ class NexusCore(
             await self._handle_reaction_remove(payload)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # NEXUS — Main settings group
+    # NEXUS — TOP LEVEL GROUP
     # ══════════════════════════════════════════════════════════════════════════
 
     @commands.group(name="nexus", aliases=["nx"])
     @commands.guild_only()
     async def nexus(self, ctx: commands.Context):
-        """🔥 NexusCore — The ultimate server management suite."""
+        """🔮 NexusCore — All-in-one server management."""
         if ctx.invoked_subcommand is None:
+            modules = [
+                ("🎫 Tickets", "`[p]ticket`"),
+                ("📋 Applications", "`[p]apply`"),
+                ("💡 Suggestions", "`[p]suggest`"),
+                ("🎭 Reaction Roles", "`[p]roles`"),
+                ("🎉 Giveaways", "`[p]giveaway`"),
+                ("📋 Server Logging", "`[p]serverlog`"),
+                ("🛡️ Moderation", "`[p]nmod`"),
+                ("🪙 Economy", "`[p]eco`"),
+                ("📨 Embed Builder", "`[p]embedbuilder`"),
+            ]
             embed = discord.Embed(
-                title="🔥 NexusCore v1.0.0",
-                description=(
-                    "The ultimate all-in-one server management cog.\n\n"
-                    "**Modules:**\n"
-                    "🎫 `[p]ticket` — Ticket system\n"
-                    "📋 `[p]apply` — Applications\n"
-                    "💡 `[p]suggest` — Suggestions\n"
-                    "🎭 `[p]roles` — Reaction roles\n"
-                    "🎉 `[p]giveaway` — Giveaways\n"
-                    "📋 `[p]serverlog` — Logging\n"
-                    "🛡️ `[p]nmod` — Moderation\n"
-                    "🪙 `[p]eco` — Economy\n"
-                ),
-                colour=Clr.INFO,
+                title="🔮 NexusCore v2.0.0",
+                description="All-in-one server management with 100+ commands.",
+                colour=Clr.PRIMARY,
             )
-            embed.set_footer(text="Use [p]nexus <module> for module settings")
+            for name, cmd in modules:
+                embed.add_field(name=name, value=cmd, inline=True)
+            embed.set_footer(text="Use [p]help <command> for details")
             await ctx.send(embed=embed)
 
-    @nexus.command(name="dashboard")
-    @checks.admin_or_permissions(administrator=True)
-    async def nexus_dashboard(self, ctx: commands.Context):
-        """View the status of all NexusCore modules."""
-        t = await self.ticket_config.guild(ctx.guild).enabled()
-        a = await self.app_config.guild(ctx.guild).enabled()
-        s = await self.suggest_config.guild(ctx.guild).enabled()
-        r = await self.rr_config.guild(ctx.guild).enabled()
-        g = await self.give_config.guild(ctx.guild).enabled()
-        l = await self.log_config.guild(ctx.guild).enabled()
-        m = await self.mod_config.guild(ctx.guild).enabled()
-        e = await self.eco_config.guild(ctx.guild).enabled()
+    @nexus.command(name="version")
+    async def nx_version(self, ctx):
+        """Show NexusCore version."""
+        embed = discord.Embed(
+            title="🔮 NexusCore",
+            description=f"**Version:** {self.__version__}\n**Author:** {self.__author__}\n**Modules:** 10\n**Commands:** 100+",
+            colour=Clr.PRIMARY,
+        )
+        await ctx.send(embed=embed)
 
-        def status(v): return "✅ Enabled" if v else "❌ Disabled"
+    @nexus.command(name="stats")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def nx_stats(self, ctx):
+        """Show NexusCore statistics."""
+        embed = discord.Embed(title="🔮 NexusCore Stats", colour=Clr.PRIMARY)
 
-        embed = discord.Embed(title="📊 NexusCore Dashboard", colour=Clr.INFO)
-        embed.add_field(name="🎫 Tickets", value=status(t), inline=True)
-        embed.add_field(name="📋 Applications", value=status(a), inline=True)
-        embed.add_field(name="💡 Suggestions", value=status(s), inline=True)
-        embed.add_field(name="🎭 Reaction Roles", value=status(r), inline=True)
-        embed.add_field(name="🎉 Giveaways", value=status(g), inline=True)
-        embed.add_field(name="📋 Logging", value=status(l), inline=True)
-        embed.add_field(name="🛡️ Moderation", value=status(m), inline=True)
-        embed.add_field(name="🪙 Economy", value=status(e), inline=True)
+        # Tickets
+        td = await self.ticket_config.guild(ctx.guild).all()
+        open_t = sum(1 for t in td["open_tickets"].values() if not t.get("closed"))
+        embed.add_field(name="🎫 Tickets", value=f"Open: {open_t} · Total: {td['counter']}", inline=True)
+
+        # Apps
+        ad = await self.app_config.guild(ctx.guild).all()
+        pending_a = sum(1 for s in ad["submissions"].values() if s["status"] == "pending")
+        embed.add_field(name="📋 Applications", value=f"Pending: {pending_a} · Total: {len(ad['submissions'])}", inline=True)
+
+        # Suggestions
+        sd = await self.suggest_config.guild(ctx.guild).all()
+        embed.add_field(name="💡 Suggestions", value=f"Total: {sd['counter']}", inline=True)
+
+        # RR
+        rrd = await self.rr_config.guild(ctx.guild).panels()
+        embed.add_field(name="🎭 Role Panels", value=str(len(rrd)), inline=True)
+
+        # Giveaways
+        gd = await self.give_config.guild(ctx.guild).all()
+        active_gw = sum(1 for g in gd["giveaways"].values() if not g["ended"])
+        embed.add_field(name="🎉 Giveaways", value=f"Active: {active_gw}", inline=True)
+
+        # Mod
+        md = await self.mod_config.guild(ctx.guild).all()
+        embed.add_field(name="🛡️ Cases", value=str(md["case_counter"]), inline=True)
+
+        # Economy
+        ed = await self.eco_config.guild(ctx.guild).all()
+        embed.add_field(name="🪙 Economy", value=f"{ed['currency_emoji']} {ed['currency_name']} · {len(ed.get('shop_items', {}))} items", inline=True)
+
         await ctx.send(embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
     # TICKETS
     # ══════════════════════════════════════════════════════════════════════════
 
-    @commands.group(name="ticket", aliases=["tk"])
+    @commands.group(name="ticket", aliases=["tickets"])
     @commands.guild_only()
     async def ticket(self, ctx: commands.Context):
-        """🎫 Ticket system management."""
+        """🎫 Ticket system."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
     @ticket.command(name="setup")
     @checks.admin_or_permissions(manage_guild=True)
-    async def ticket_setup(self, ctx, channel: discord.TextChannel, category: discord.CategoryChannel):
-        """Set up the ticket system with a log channel and category."""
+    async def ticket_setup(self, ctx, category: discord.CategoryChannel, log_channel: discord.TextChannel):
+        """Setup the ticket system."""
         await self.ticket_config.guild(ctx.guild).enabled.set(True)
-        await self.ticket_config.guild(ctx.guild).log_channel.set(channel.id)
         await self.ticket_config.guild(ctx.guild).category_id.set(category.id)
-        await ctx.send(embed=ok_embed(f"Tickets enabled! Log: {channel.mention}, Category: {category.mention}"))
+        await self.ticket_config.guild(ctx.guild).log_channel.set(log_channel.id)
+        await ctx.send(embed=ok_embed(f"Tickets enabled!\nCategory: {category.mention}\nLog: {log_channel.mention}"))
 
     @ticket.command(name="panel")
     @checks.admin_or_permissions(manage_guild=True)
-    async def ticket_panel(self, ctx, channel: discord.TextChannel, *, title: str = "Support Tickets"):
-        """Send a ticket panel to a channel."""
+    async def ticket_panel(self, ctx, channel: discord.TextChannel = None):
+        """Send a ticket creation panel."""
+        channel = channel or ctx.channel
         embed = discord.Embed(
-            title=f"🎫 {title}",
+            title="🎫 Support Tickets",
             description="Click the button below to create a ticket.\nA staff member will assist you shortly.",
             colour=Clr.TICKET,
         )
-        embed.set_footer(text="NexusCore Tickets")
-        msg = await channel.send(embed=embed, view=self._ticket_panel_view)
-        await ctx.send(embed=ok_embed(f"Panel sent to {channel.mention}!"))
+        embed.set_footer(text="NexusCore Ticket System")
+        await channel.send(embed=embed, view=self._ticket_panel_view)
+        await ctx.send(embed=ok_embed(f"Panel sent to {channel.mention}"))
 
-    @ticket.command(name="addcategory", aliases=["addcat"])
+    @ticket.command(name="addcategory")
     @checks.admin_or_permissions(manage_guild=True)
-    async def ticket_addcategory(self, ctx, name: str, role: discord.Role, *, description: str = ""):
-        """Add a ticket category with a staff role."""
+    async def ticket_addcategory(self, ctx, name: str, *, description: str = ""):
+        """Add a ticket category."""
         async with self.ticket_config.guild(ctx.guild).categories() as cats:
             cats[name.lower()] = {
-                "description": description,
-                "emoji": "🎫",
-                "roles": [role.id],
-                "questions": [],
-                "greeting": "",
+                "description": description, "roles": [],
+                "questions": [], "emoji": "🎫",
+                "channel_name_fmt": None, "greeting": None,
                 "default_priority": "medium",
-                "channel_name_fmt": f"ticket-{name.lower()}-{{number}}",
             }
-        await ctx.send(embed=ok_embed(f"Category **{name}** added with role {role.mention}"))
+        await ctx.send(embed=ok_embed(f"Category **{name}** added."))
 
     @ticket.command(name="addquestion")
     @checks.admin_or_permissions(manage_guild=True)
     async def ticket_addquestion(self, ctx, category: str, *, question: str):
-        """Add a question to a ticket category (shown in modal)."""
+        """Add a question to a ticket category."""
         async with self.ticket_config.guild(ctx.guild).categories() as cats:
             cat = cats.get(category.lower())
             if not cat:
-                return await ctx.send(embed=err_embed(f"Category `{category}` not found."))
-            if len(cat.get("questions", [])) >= 5:
-                return await ctx.send(embed=err_embed("Max 5 questions per category (Discord modal limit)."))
+                return await ctx.send(embed=err_embed("Category not found."))
             cat.setdefault("questions", []).append(question)
-        await ctx.send(embed=ok_embed(f"Question added to **{category}**: {question}"))
+        await ctx.send(embed=ok_embed(f"Question added to **{category}**."))
+
+    @ticket.command(name="addrole")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def ticket_addrole(self, ctx, category: str, role: discord.Role):
+        """Add a staff role to a ticket category."""
+        async with self.ticket_config.guild(ctx.guild).categories() as cats:
+            cat = cats.get(category.lower())
+            if not cat:
+                return await ctx.send(embed=err_embed("Category not found."))
+            cat.setdefault("roles", []).append(role.id)
+        await ctx.send(embed=ok_embed(f"{role.mention} added to **{category}**."))
 
     @ticket.command(name="transcript")
     @checks.admin_or_permissions(manage_guild=True)
-    async def ticket_transcript_channel(self, ctx, channel: discord.TextChannel):
+    async def ticket_transcript(self, ctx, channel: discord.TextChannel):
         """Set the transcript channel."""
         await self.ticket_config.guild(ctx.guild).transcript_channel.set(channel.id)
-        await ctx.send(embed=ok_embed(f"Transcripts will be sent to {channel.mention}"))
+        await ctx.send(embed=ok_embed(f"Transcripts → {channel.mention}"))
+
+    @ticket.command(name="archive")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def ticket_archive(self, ctx, category: discord.CategoryChannel):
+        """Set archive category (closed tickets move here instead of being deleted)."""
+        await self.ticket_config.guild(ctx.guild).archive_channel.set(category.id)
+        await ctx.send(embed=ok_embed(f"Archive category → {category.mention}"))
+
+    @ticket.command(name="autoclose")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def ticket_autoclose(self, ctx, hours: int):
+        """Set auto-close inactivity timer (0 = disabled)."""
+        await self.ticket_config.guild(ctx.guild).auto_close_hours.set(hours)
+        await ctx.send(embed=ok_embed(f"Auto-close: {hours}h" if hours else "Auto-close disabled."))
 
     @ticket.command(name="maxperuser")
     @checks.admin_or_permissions(manage_guild=True)
-    async def ticket_max(self, ctx, count: int):
+    async def ticket_maxperuser(self, ctx, count: int):
         """Set max open tickets per user."""
         await self.ticket_config.guild(ctx.guild).max_per_user.set(count)
-        await ctx.send(embed=ok_embed(f"Max tickets per user: {count}"))
+        await ctx.send(embed=ok_embed(f"Max per user: {count}"))
 
-    @ticket.command(name="blacklist")
+    @ticket.command(name="addtag")
     @checks.admin_or_permissions(manage_guild=True)
-    async def ticket_blacklist(self, ctx, user: discord.Member):
-        """Blacklist a user from creating tickets."""
-        async with self.ticket_config.guild(ctx.guild).blacklisted() as bl:
-            if user.id in bl:
-                bl.remove(user.id)
-                await ctx.send(embed=ok_embed(f"{user.mention} removed from ticket blacklist."))
-            else:
-                bl.append(user.id)
-                await ctx.send(embed=ok_embed(f"{user.mention} blacklisted from tickets."))
+    async def ticket_addtag(self, ctx, name: str, *, description: str = ""):
+        """Add a ticket tag."""
+        async with self.ticket_config.guild(ctx.guild).tags() as tags:
+            tags[name.lower()] = {"description": description, "colour": Clr.TICKET.value}
+        await ctx.send(embed=ok_embed(f"Tag **{name}** added."))
+
+    @ticket.command(name="add")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def ticket_add(self, ctx, user: discord.Member):
+        """Add a user to the current ticket."""
+        success = await self._add_user_to_ticket(ctx, user)
+        if not success:
+            await ctx.send(embed=err_embed("This isn't a ticket channel."))
+
+    @ticket.command(name="remove")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def ticket_remove(self, ctx, user: discord.Member):
+        """Remove a user from the current ticket."""
+        success = await self._remove_user_from_ticket(ctx, user)
+        if not success:
+            await ctx.send(embed=err_embed("This isn't a ticket channel."))
+
+    @ticket.command(name="rename")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def ticket_rename(self, ctx, *, new_name: str):
+        """Rename the current ticket channel."""
+        success = await self._rename_ticket(ctx, new_name)
+        if success:
+            await ctx.send(embed=ok_embed(f"Renamed to **{new_name}**"))
+        else:
+            await ctx.send(embed=err_embed("Not a ticket or renaming disabled."))
+
+    @ticket.command(name="reopen")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def ticket_reopen(self, ctx, channel: discord.TextChannel = None):
+        """Reopen a closed ticket."""
+        channel = channel or ctx.channel
+        success = await self._reopen_ticket(ctx, channel)
+        if not success:
+            await ctx.send(embed=err_embed("Not a closed ticket or reopen is disabled."))
 
     @ticket.command(name="close")
     async def ticket_close_cmd(self, ctx):
         """Close the current ticket."""
-        class _FakeInteraction:
+        from .tickets import TicketControlView
+        class _FI:
             guild = ctx.guild
-            channel = ctx.channel
             user = ctx.author
+            channel = ctx.channel
             async def response_send_message(self, *a, **k): await ctx.send(*a, **k)
-            response = type("R", (), {"send_message": response_send_message, "defer": lambda s: asyncio.sleep(0)})()
-        # Use a simpler approach
-        ch_id = str(ctx.channel.id)
-        data = await self.ticket_config.guild(ctx.guild).all()
-        if ch_id not in data["open_tickets"]:
-            return await ctx.send(embed=err_embed("This is not a ticket channel."))
+            response = type("R", (), {"send_message": lambda s, *a, **k: ctx.send(*a, **k), "defer": lambda s: None})()
+            async def followup_send(self, *a, **k): await ctx.send(*a, **k)
+            followup = type("F", (), {"send": lambda s, *a, **k: ctx.send(*a, **k)})()
+        fake = _FI()
+        fake.guild = ctx.guild
+        fake.user = ctx.author
+        fake.channel = ctx.channel
+        await self._close_ticket(fake)
 
-        from .tickets import build_transcript_html
-        ticket = data["open_tickets"][ch_id]
-        async with self.ticket_config.guild(ctx.guild).open_tickets() as tickets:
-            tickets[ch_id]["closed"] = True
-        # Transcript
-        transcript_ch_id = data.get("transcript_channel")
-        if transcript_ch_id:
-            ch = ctx.guild.get_channel(transcript_ch_id)
-            if ch:
-                import io
-                html = await build_transcript_html(ctx.channel, ticket)
-                file = discord.File(io.BytesIO(html.encode()), filename=f"transcript-{ticket.get('number',0)}.html")
-                await safe_send(ch, file=file)
+    @ticket.command(name="blacklist")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def ticket_blacklist(self, ctx, user: discord.Member):
+        """Toggle blacklist a user from creating tickets."""
+        async with self.ticket_config.guild(ctx.guild).blacklisted() as bl:
+            if user.id in bl:
+                bl.remove(user.id)
+                await ctx.send(embed=ok_embed(f"{user.mention} unblacklisted."))
+            else:
+                bl.append(user.id)
+                await ctx.send(embed=ok_embed(f"{user.mention} blacklisted from tickets."))
 
-        await ctx.send(embed=info_embed("🔒 Ticket closed. Deleting in 10s..."))
-        await asyncio.sleep(10)
-        try:
-            await ctx.channel.delete(reason=f"Ticket closed by {ctx.author}")
-        except discord.HTTPException:
-            pass
+    @ticket.command(name="stats")
+    @checks.mod_or_permissions(manage_channels=True)
+    async def ticket_stats(self, ctx):
+        """View ticket statistics."""
+        closed = await self.ticket_config.guild(ctx.guild).closed_tickets()
+        stats = self._get_ticket_stats(closed)
+        embed = discord.Embed(title="🎫 Ticket Statistics", colour=Clr.TICKET)
+        embed.add_field(name="Total Closed", value=str(stats["total"]), inline=True)
+        embed.add_field(name="Avg First Response", value=stats.get("avg_first_response", "N/A"), inline=True)
+        if stats.get("categories"):
+            cats = "\n".join(f"**{k}:** {v}" for k, v in stats["categories"].items())
+            embed.add_field(name="By Category", value=cats, inline=False)
+        await ctx.send(embed=embed)
 
     @ticket.command(name="settings")
     @checks.admin_or_permissions(manage_guild=True)
     async def ticket_settings(self, ctx):
-        """View current ticket settings."""
+        """View ticket settings."""
         data = await self.ticket_config.guild(ctx.guild).all()
         embed = discord.Embed(title="🎫 Ticket Settings", colour=Clr.TICKET)
         embed.add_field(name="Enabled", value="✅" if data["enabled"] else "❌", inline=True)
-        embed.add_field(name="Max/User", value=str(data["max_per_user"]), inline=True)
+        embed.add_field(name="Max Per User", value=str(data["max_per_user"]), inline=True)
+        embed.add_field(name="Auto-Close", value=f"{data['auto_close_hours']}h" if data["auto_close_hours"] else "Off", inline=True)
         embed.add_field(name="Claim", value="✅" if data["claim_enabled"] else "❌", inline=True)
         embed.add_field(name="Feedback", value="✅" if data["feedback_enabled"] else "❌", inline=True)
-        embed.add_field(name="DM on Open", value="✅" if data["dm_on_open"] else "❌", inline=True)
-        embed.add_field(name="DM on Close", value="✅" if data["dm_on_close"] else "❌", inline=True)
+        embed.add_field(name="DM On Open", value="✅" if data["dm_on_open"] else "❌", inline=True)
         cats = data.get("categories", {})
         if cats:
             embed.add_field(name="Categories", value=", ".join(cats.keys()), inline=False)
+        tags = data.get("tags", {})
+        if tags:
+            embed.add_field(name="Tags", value=", ".join(tags.keys()), inline=False)
         await ctx.send(embed=embed)
-
-    @ticket.command(name="toggle")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def ticket_toggle(self, ctx, setting: str):
-        """Toggle a ticket setting: claim, feedback, dm_open, dm_close, user_close, pin, thread."""
-        toggles = {
-            "claim": "claim_enabled", "feedback": "feedback_enabled",
-            "dm_open": "dm_on_open", "dm_close": "dm_on_close",
-            "user_close": "allow_user_close", "pin": "auto_pin_first",
-            "thread": "thread_mode",
-        }
-        if setting not in toggles:
-            return await ctx.send(embed=err_embed(f"Options: {', '.join(toggles.keys())}"))
-        key = toggles[setting]
-        current = await getattr(self.ticket_config.guild(ctx.guild), key)()
-        await getattr(self.ticket_config.guild(ctx.guild), key).set(not current)
-        await ctx.send(embed=ok_embed(f"**{setting}** {'disabled' if current else 'enabled'}"))
 
     # ══════════════════════════════════════════════════════════════════════════
     # APPLICATIONS
     # ══════════════════════════════════════════════════════════════════════════
 
-    @commands.group(name="apply", aliases=["app", "application"])
+    @commands.group(name="apply", aliases=["application", "apps"])
     @commands.guild_only()
     async def apply(self, ctx: commands.Context):
         """📋 Application system."""
@@ -388,198 +489,299 @@ class NexusCore(
 
     @apply.command(name="setup")
     @checks.admin_or_permissions(manage_guild=True)
-    async def app_setup(self, ctx, review_channel: discord.TextChannel):
-        """Set up applications with a review channel."""
+    async def apply_setup(self, ctx, review_channel: discord.TextChannel):
+        """Setup the application system."""
         await self.app_config.guild(ctx.guild).enabled.set(True)
         await self.app_config.guild(ctx.guild).review_channel.set(review_channel.id)
-        await ctx.send(embed=ok_embed(f"Applications enabled! Review channel: {review_channel.mention}"))
-
-    @apply.command(name="addtype")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def app_addtype(self, ctx, name: str, *, description: str = ""):
-        """Add an application type."""
-        async with self.app_config.guild(ctx.guild).types() as types:
-            types[name.lower()] = {
-                "description": description,
-                "emoji": "📋",
-                "questions": [],
-                "role_on_accept": None,
-                "role_on_deny": None,
-                "accept_msg": "",
-                "deny_msg": "",
-                "review_channel": None,
-                "cooldown": 0,
-                "max_pending": 1,
-                "auto_thread": True,
-                "require_account_age_days": 0,
-                "require_server_days": 0,
-                "enabled": True,
-                "review_roles": [],
-            }
-        await ctx.send(embed=ok_embed(f"Application type **{name}** created."))
-
-    @apply.command(name="addquestion")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def app_addquestion(self, ctx, type_name: str, style: str, *, label: str):
-        """Add a question: [p]apply addquestion staff short What is your timezone?"""
-        if style not in ("short", "long"):
-            return await ctx.send(embed=err_embed("Style must be `short` or `long`."))
-        async with self.app_config.guild(ctx.guild).types() as types:
-            t = types.get(type_name.lower())
-            if not t:
-                return await ctx.send(embed=err_embed(f"Type `{type_name}` not found."))
-            t.setdefault("questions", []).append({"label": label, "style": style, "required": True, "max_length": 1024})
-        await ctx.send(embed=ok_embed(f"Question added to **{type_name}**: {label}"))
-
-    @apply.command(name="setrole")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def app_setrole(self, ctx, type_name: str, action: str, role: discord.Role):
-        """Set role given on accept/deny: [p]apply setrole staff accept @StaffRole"""
-        if action not in ("accept", "deny"):
-            return await ctx.send(embed=err_embed("Action must be `accept` or `deny`."))
-        key = f"role_on_{action}"
-        async with self.app_config.guild(ctx.guild).types() as types:
-            t = types.get(type_name.lower())
-            if not t:
-                return await ctx.send(embed=err_embed(f"Type `{type_name}` not found."))
-            t[key] = role.id
-        await ctx.send(embed=ok_embed(f"**{type_name}** — {action} role set to {role.mention}"))
+        await ctx.send(embed=ok_embed(f"Applications enabled! Review → {review_channel.mention}"))
 
     @apply.command(name="panel")
     @checks.admin_or_permissions(manage_guild=True)
-    async def app_panel(self, ctx, channel: discord.TextChannel):
-        """Send an application panel to a channel."""
-        types = await self.app_config.guild(ctx.guild).types()
-        desc = "\n".join(f"• **{name.title()}** — {td.get('description', '')}" for name, td in types.items())
+    async def apply_panel(self, ctx, channel: discord.TextChannel = None):
+        """Send an application panel."""
+        channel = channel or ctx.channel
         embed = discord.Embed(
             title="📋 Applications",
-            description=f"Click below to apply!\n\n{desc}" if desc else "Click below to apply!",
+            description="Click below to apply!",
             colour=Clr.APP,
         )
         await channel.send(embed=embed, view=self._app_panel_view)
-        await ctx.send(embed=ok_embed(f"Application panel sent to {channel.mention}"))
+        await ctx.send(embed=ok_embed(f"Panel sent to {channel.mention}"))
 
-    @apply.command(name="list")
+    @apply.command(name="addtype")
     @checks.admin_or_permissions(manage_guild=True)
-    async def app_list(self, ctx, status: str = "pending"):
-        """List applications by status: pending, accepted, denied, interview."""
-        subs = await self.app_config.guild(ctx.guild).submissions()
-        filtered = {k: v for k, v in subs.items() if v["status"] == status}
-        if not filtered:
-            return await ctx.send(embed=info_embed(f"No {status} applications."))
+    async def apply_addtype(self, ctx, name: str, *, description: str = ""):
+        """Add an application type."""
+        async with self.app_config.guild(ctx.guild).types() as types:
+            types[name.lower()] = {
+                "description": description, "enabled": True, "emoji": "📋",
+                "questions": [{"label": "Why are you applying?", "style": "long"}],
+                "role_on_accept": None, "role_on_deny": None,
+                "review_channel": None, "cooldown": None,
+                "accept_msg": None, "deny_msg": None,
+                "auto_thread": False,
+                "require_account_age_days": 0, "require_server_days": 0,
+            }
+        await ctx.send(embed=ok_embed(f"Type **{name}** added. Add questions: `[p]apply addquestion {name} <question>`"))
 
-        pages = []
-        for chunk in chunk_list(list(filtered.items()), 5):
-            embed = discord.Embed(title=f"📋 Applications — {status.title()}", colour=Clr.APP)
-            for sub_id, sub in chunk:
-                embed.add_field(
-                    name=f"{sub_id} — {sub.get('user_name', 'Unknown')}",
-                    value=f"Type: {sub['type']} · {ts_relative(sub['submitted_at'])}",
-                    inline=False,
-                )
-            pages.append(embed)
+    @apply.command(name="addquestion")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def apply_addquestion(self, ctx, type_name: str, *, question: str):
+        """Add a question to an application type."""
+        async with self.app_config.guild(ctx.guild).types() as types:
+            td = types.get(type_name.lower())
+            if not td:
+                return await ctx.send(embed=err_embed("Type not found."))
+            td.setdefault("questions", []).append({"label": question, "style": "long"})
+        await ctx.send(embed=ok_embed(f"Question added to **{type_name}**."))
 
-        pag = Paginator(pages, author_id=ctx.author.id)
-        await pag.send(ctx)
+    @apply.command(name="setrole")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def apply_setrole(self, ctx, type_name: str, accept_role: discord.Role, deny_role: discord.Role = None):
+        """Set roles given on accept/deny."""
+        async with self.app_config.guild(ctx.guild).types() as types:
+            td = types.get(type_name.lower())
+            if not td:
+                return await ctx.send(embed=err_embed("Type not found."))
+            td["role_on_accept"] = accept_role.id
+            if deny_role:
+                td["role_on_deny"] = deny_role.id
+        await ctx.send(embed=ok_embed(f"Roles set for **{type_name}**."))
+
+    @apply.command(name="voting")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def apply_voting(self, ctx, enabled: bool, threshold: int = 3):
+        """Enable/disable voting on applications."""
+        await self.app_config.guild(ctx.guild).voting_enabled.set(enabled)
+        await self.app_config.guild(ctx.guild).voting_threshold.set(threshold)
+        await ctx.send(embed=ok_embed(f"Voting {'enabled' if enabled else 'disabled'} (threshold: {threshold})"))
+
+    @apply.command(name="webhook")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def apply_webhook(self, ctx, url: str):
+        """Set a webhook URL for application notifications."""
+        await self.app_config.guild(ctx.guild).webhook_url.set(url)
+        await ctx.send(embed=ok_embed("Webhook URL set."))
+
+    @apply.command(name="bulk")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def apply_bulk(self, ctx, type_name: str = None):
+        """Bulk accept/deny pending applications."""
+        data = await self.app_config.guild(ctx.guild).all()
+        pending = {k: v for k, v in data["submissions"].items() if v["status"] == "pending"}
+        if type_name:
+            pending = {k: v for k, v in pending.items() if v["type"] == type_name.lower()}
+        if not pending:
+            return await ctx.send(embed=info_embed("No pending applications."))
+        from .applications import BulkActionView
+        view = BulkActionView(self, list(pending.keys()))
+        await ctx.send(f"**{len(pending)}** pending applications. Choose action:", view=view)
+
+    @apply.command(name="savetemplate")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def apply_savetemplate(self, ctx, type_name: str, template_name: str):
+        """Save an application type as a template."""
+        success = await self._save_app_template(ctx.guild, template_name, type_name.lower())
+        if success:
+            await ctx.send(embed=ok_embed(f"Template **{template_name}** saved."))
+        else:
+            await ctx.send(embed=err_embed("Type not found."))
+
+    @apply.command(name="loadtemplate")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def apply_loadtemplate(self, ctx, template_name: str, type_name: str):
+        """Load a template into an application type."""
+        success = await self._load_app_template(ctx.guild, template_name, type_name.lower())
+        if success:
+            await ctx.send(embed=ok_embed(f"Template **{template_name}** → **{type_name}**"))
+        else:
+            await ctx.send(embed=err_embed("Template not found."))
+
+    @apply.command(name="stats")
+    @checks.mod_or_permissions(manage_messages=True)
+    async def apply_stats(self, ctx):
+        """View application statistics."""
+        data = await self.app_config.guild(ctx.guild).all()
+        stats = self._get_app_stats(data)
+        embed = discord.Embed(title="📋 Application Stats", colour=Clr.APP)
+        embed.add_field(name="Total", value=str(stats["total"]), inline=True)
+        for status, count in stats["by_status"].items():
+            embed.add_field(name=status.title(), value=str(count), inline=True)
+        s = stats.get("stats", {})
+        if s.get("avg_review_time"):
+            embed.add_field(name="Avg Review Time", value=duration_str(s["avg_review_time"]), inline=True)
+        await ctx.send(embed=embed)
+
+    @apply.command(name="settings")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def apply_settings(self, ctx):
+        """View application settings."""
+        data = await self.app_config.guild(ctx.guild).all()
+        embed = discord.Embed(title="📋 Application Settings", colour=Clr.APP)
+        embed.add_field(name="Enabled", value="✅" if data["enabled"] else "❌", inline=True)
+        embed.add_field(name="Voting", value="✅" if data.get("voting_enabled") else "❌", inline=True)
+        embed.add_field(name="DM Results", value="✅" if data["dm_results"] else "❌", inline=True)
+        types = data.get("types", {})
+        if types:
+            embed.add_field(name="Types", value=", ".join(types.keys()), inline=False)
+        await ctx.send(embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
     # SUGGESTIONS
     # ══════════════════════════════════════════════════════════════════════════
 
-    @commands.group(name="suggest", aliases=["suggestion"])
+    @commands.group(name="suggest", aliases=["suggestion", "suggestions"])
     @commands.guild_only()
     async def suggest(self, ctx: commands.Context):
         """💡 Suggestion system."""
         if ctx.invoked_subcommand is None:
-            # Quick-suggest if text provided
-            if ctx.message.content.strip().split(None, 1).__len__() > 1:
-                text = ctx.message.content.strip().split(None, 1)[1]
-                return await self._quick_suggest(ctx, text)
             await ctx.send_help(ctx.command)
-
-    async def _quick_suggest(self, ctx, text):
-        data = await self.suggest_config.guild(ctx.guild).all()
-        if not data["enabled"]:
-            return await ctx.send(embed=err_embed("Suggestions are disabled."))
-        if len(text) < data["min_length"]:
-            return await ctx.send(embed=err_embed(f"Suggestion must be at least {data['min_length']} chars."))
-
-        class _FakeInteraction:
-            guild = ctx.guild
-            user = ctx.author
-        await self._create_suggestion(_FakeInteraction(), text)
-        await ctx.send(embed=ok_embed("Suggestion submitted!"), delete_after=5)
-        try:
-            await ctx.message.delete()
-        except discord.HTTPException:
-            pass
 
     @suggest.command(name="setup")
     @checks.admin_or_permissions(manage_guild=True)
     async def suggest_setup(self, ctx, channel: discord.TextChannel):
-        """Set the suggestions channel."""
+        """Setup the suggestion system."""
         await self.suggest_config.guild(ctx.guild).enabled.set(True)
         await self.suggest_config.guild(ctx.guild).channel.set(channel.id)
-        await ctx.send(embed=ok_embed(f"Suggestions enabled in {channel.mention}"))
+        await ctx.send(embed=ok_embed(f"Suggestions enabled! Channel: {channel.mention}"))
+
+    @suggest.command(name="panel")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def suggest_panel(self, ctx, channel: discord.TextChannel = None):
+        """Send a suggestion panel."""
+        channel = channel or ctx.channel
+        embed = discord.Embed(
+            title="💡 Suggestions", description="Submit your ideas!",
+            colour=Clr.SUGGEST,
+        )
+        await channel.send(embed=embed, view=self._suggest_panel_view)
+        await ctx.send(embed=ok_embed(f"Panel sent to {channel.mention}"))
+
+    @suggest.command(name="new")
+    async def suggest_new(self, ctx, *, content: str):
+        """Submit a suggestion via command."""
+        class _FI:
+            guild = ctx.guild
+            user = ctx.author
+            async def response_defer(self, **k): pass
+            response = type("R", (), {"defer": lambda s, **k: None})()
+            async def followup_send(self, *a, **k): await ctx.send(*a, **k)
+            followup = type("F", (), {"send": lambda s, *a, **k: ctx.send(*a, **k)})()
+        fake = _FI()
+        fake.guild = ctx.guild
+        fake.user = ctx.author
+        await self._create_suggestion(fake, content)
+        await ctx.send(embed=ok_embed("Suggestion submitted!"))
 
     @suggest.command(name="status")
-    @checks.admin_or_permissions(manage_messages=True)
-    async def suggest_status(self, ctx, suggestion_id: str):
-        """Change a suggestion's status."""
-        from .suggestions import StatusSelectView
-        view = StatusSelectView(self, suggestion_id)
-        await ctx.send("Select a status:", view=view)
+    @checks.mod_or_permissions(manage_messages=True)
+    async def suggest_status(self, ctx, suggestion_id: str, *, status: str):
+        """Set suggestion status."""
+        from .suggestions import STATUS_MAP
+        if status.lower() not in STATUS_MAP:
+            valid = ", ".join(STATUS_MAP.keys())
+            return await ctx.send(embed=err_embed(f"Valid statuses: {valid}"))
+        class _FI:
+            guild = ctx.guild
+            user = ctx.author
+            async def response_send_message(self, *a, **k): await ctx.send(*a, **k)
+            response = type("R", (), {"send_message": lambda s, *a, **k: ctx.send(*a, **k)})()
+        await self._set_status(_FI(), suggestion_id, status.lower())
 
     @suggest.command(name="respond")
-    @checks.admin_or_permissions(manage_messages=True)
+    @checks.mod_or_permissions(manage_messages=True)
     async def suggest_respond(self, ctx, suggestion_id: str, *, response: str):
         """Add a staff response to a suggestion."""
-        data = await self.suggest_config.guild(ctx.guild).all()
-        s = data["suggestions"].get(suggestion_id)
-        if not s:
-            return await ctx.send(embed=err_embed("Not found."))
-
-        async with self.suggest_config.guild(ctx.guild).suggestions() as subs:
-            subs[suggestion_id]["staff_response"] = response
-
+        conf = self.suggest_config.guild(ctx.guild)
+        async with conf.suggestions() as subs:
+            s = subs.get(suggestion_id)
+            if not s:
+                return await ctx.send(embed=err_embed("Not found."))
+            s["staff_response"] = response
+            s.setdefault("staff_responses", []).append({
+                "text": response, "author": ctx.author.id, "at": ts_now()
+            })
+        data = await conf.all()
         channel = ctx.guild.get_channel(data["channel"])
         if channel and s.get("message_id"):
             try:
                 msg = await channel.fetch_message(s["message_id"])
                 if msg.embeds:
                     embed = msg.embeds[0]
-                    embed.add_field(name="💬 Staff Response", value=response[:1024], inline=False)
+                    embed.add_field(name=f"Staff Response — {ctx.author.display_name}", value=response[:1024], inline=False)
                     await msg.edit(embed=embed)
             except discord.HTTPException:
                 pass
         await ctx.send(embed=ok_embed("Response added."))
 
-    @suggest.command(name="panel")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def suggest_panel(self, ctx, channel: discord.TextChannel):
-        """Send a suggestion panel with buttons."""
-        embed = discord.Embed(
-            title="💡 Suggestions",
-            description="Click below to submit a suggestion!",
-            colour=Clr.SUGGEST,
-        )
-        await channel.send(embed=embed, view=self._suggest_panel_view)
-        await ctx.send(embed=ok_embed(f"Suggestion panel sent to {channel.mention}"))
-
-    @suggest.command(name="top")
-    async def suggest_top(self, ctx, limit: int = 10):
-        """View top voted suggestions."""
+    @suggest.command(name="edit")
+    async def suggest_edit(self, ctx, suggestion_id: str):
+        """Edit your suggestion (within edit window)."""
         data = await self.suggest_config.guild(ctx.guild).all()
-        subs = data["suggestions"]
-        sorted_subs = sorted(subs.items(), key=lambda x: len(x[1].get("upvotes", [])) - len(x[1].get("downvotes", [])), reverse=True)
-        embed = discord.Embed(title="💡 Top Suggestions", colour=Clr.SUGGEST)
-        for s_id, s in sorted_subs[:limit]:
-            score = len(s.get("upvotes", [])) - len(s.get("downvotes", []))
-            embed.add_field(
-                name=f"#{s_id} ({score:+d})",
-                value=s["content"][:100],
-                inline=False,
-            )
+        s = data["suggestions"].get(suggestion_id)
+        if not s:
+            return await ctx.send(embed=err_embed("Not found."))
+        if s["user_id"] != ctx.author.id:
+            return await ctx.send(embed=err_embed("You can only edit your own suggestions."))
+        from .suggestions import EditSuggestionModal
+        # Can't send modal from a prefix command; give instructions
+        await ctx.send(embed=info_embed(f"To edit, use the suggestion panel button or DM-reply feature. Edit window: {data.get('edit_window', 300)}s."))
+
+    @suggest.command(name="merge")
+    @checks.mod_or_permissions(manage_messages=True)
+    async def suggest_merge(self, ctx, target_id: str, source_id: str):
+        """Merge a duplicate suggestion into another."""
+        success = await self._merge_suggestions(ctx.guild, target_id, source_id)
+        if success:
+            await ctx.send(embed=ok_embed(f"Suggestion #{source_id} merged into #{target_id}."))
+        else:
+            await ctx.send(embed=err_embed("One or both suggestions not found."))
+
+    @suggest.command(name="tag")
+    @checks.mod_or_permissions(manage_messages=True)
+    async def suggest_tag(self, ctx, suggestion_id: str, *, tag: str):
+        """Add a tag to a suggestion."""
+        success = await self._tag_suggestion(ctx.guild, suggestion_id, tag.lower())
+        if success:
+            await ctx.send(embed=ok_embed(f"Tag **{tag}** added."))
+        else:
+            await ctx.send(embed=err_embed("Not found."))
+
+    @suggest.command(name="addcategory")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def suggest_addcategory(self, ctx, *, category: str):
+        """Add a suggestion category."""
+        async with self.suggest_config.guild(ctx.guild).categories() as cats:
+            if category.lower() not in cats:
+                cats.append(category.lower())
+        await ctx.send(embed=ok_embed(f"Category **{category}** added."))
+
+    @suggest.command(name="stats")
+    @checks.mod_or_permissions(manage_messages=True)
+    async def suggest_stats(self, ctx):
+        """View suggestion statistics."""
+        data = await self.suggest_config.guild(ctx.guild).all()
+        stats = self._get_suggestion_stats(data)
+        embed = discord.Embed(title="💡 Suggestion Stats", colour=Clr.SUGGEST)
+        embed.add_field(name="Total", value=str(stats["total"]), inline=True)
+        embed.add_field(name="Total Upvotes", value=str(stats["total_upvotes"]), inline=True)
+        embed.add_field(name="Total Downvotes", value=str(stats["total_downvotes"]), inline=True)
+        for status, count in stats["by_status"].items():
+            embed.add_field(name=status.title(), value=str(count), inline=True)
+        await ctx.send(embed=embed)
+
+    @suggest.command(name="settings")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def suggest_settings(self, ctx):
+        """View suggestion settings."""
+        data = await self.suggest_config.guild(ctx.guild).all()
+        embed = discord.Embed(title="💡 Suggestion Settings", colour=Clr.SUGGEST)
+        ch = ctx.guild.get_channel(data["channel"]) if data["channel"] else None
+        embed.add_field(name="Enabled", value="✅" if data["enabled"] else "❌", inline=True)
+        embed.add_field(name="Channel", value=ch.mention if ch else "Not set", inline=True)
+        embed.add_field(name="Anonymous", value="✅" if data["anonymous_allowed"] else "❌", inline=True)
+        embed.add_field(name="Auto Thread", value="✅" if data["auto_thread"] else "❌", inline=True)
+        embed.add_field(name="Button Voting", value="✅" if data["voting_buttons"] else "❌", inline=True)
         await ctx.send(embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -664,6 +866,30 @@ class NexusCore(
             panels[panel_id]["temp_minutes"] = minutes
         await ctx.send(embed=ok_embed(f"Temp role: {minutes}m" if minutes else "Roles are now permanent"))
 
+    @roles.command(name="require")
+    async def rr_require(self, ctx, panel_id: str, role: discord.Role):
+        """Require a role to use a panel."""
+        async with self.rr_config.guild(ctx.guild).panels() as panels:
+            if panel_id not in panels:
+                return await ctx.send(embed=err_embed("Panel not found."))
+            panels[panel_id]["require_role"] = role.id
+        await ctx.send(embed=ok_embed(f"Panel `{panel_id}` requires {role.mention}"))
+
+    @roles.command(name="clone")
+    async def rr_clone(self, ctx, panel_id: str, channel: discord.TextChannel):
+        """Clone a role panel to another channel."""
+        new_id = await self._clone_panel(ctx.guild, panel_id, channel)
+        if new_id:
+            await ctx.send(embed=ok_embed(f"Cloned! New panel ID: `{new_id}`"))
+        else:
+            await ctx.send(embed=err_embed("Panel not found."))
+
+    @roles.command(name="verify")
+    async def rr_verify(self, ctx, channel: discord.TextChannel, role: discord.Role, *, title: str = "Verification"):
+        """Create a verification panel."""
+        vpid = await self._create_verification_panel(ctx, channel, role, title=title)
+        await ctx.send(embed=ok_embed(f"Verification panel created! ID: `{vpid}`"))
+
     @roles.command(name="list")
     async def rr_list(self, ctx):
         """List all role panels."""
@@ -695,6 +921,19 @@ class NexusCore(
             except discord.HTTPException:
                 pass
         await ctx.send(embed=ok_embed(f"Panel `{panel_id}` deleted."))
+
+    @roles.command(name="stats")
+    async def rr_stats(self, ctx):
+        """View reaction role stats."""
+        stats = await self.rr_config.guild(ctx.guild).stats()
+        if not stats:
+            return await ctx.send(embed=info_embed("No role stats yet."))
+        embed = discord.Embed(title="🎭 Role Stats", colour=Clr.ROLES)
+        for rid, data in list(stats.items())[:20]:
+            role = ctx.guild.get_role(int(rid))
+            name = role.name if role else f"ID:{rid}"
+            embed.add_field(name=name, value=f"➕ {data.get('added', 0)} · ➖ {data.get('removed', 0)}", inline=True)
+        await ctx.send(embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
     # GIVEAWAYS
@@ -739,7 +978,7 @@ class NexusCore(
             guild = ctx.guild
             user = ctx.author
             async def response_send_message(s, *a, **k): await ctx.send(*a, **k)
-            response = type("R", (), {"send_message": response_send_message})()
+            response = type("R", (), {"send_message": lambda s, *a, **k: ctx.send(*a, **k)})()
         await self._reroll_giveaway(_FI(), gw_id)
 
     @giveaway.command(name="list")
@@ -778,6 +1017,42 @@ class NexusCore(
             gws[gw_id].setdefault("bonus_roles", {})[str(role.id)] = entries
         await ctx.send(embed=ok_embed(f"{role.mention} gets +{entries} bonus entries in `{gw_id}`"))
 
+    @giveaway.command(name="savetemplate")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def gw_savetemplate(self, ctx, name: str, channel: discord.TextChannel, duration: str, winners: int, *, prize: str):
+        """Save a giveaway template."""
+        dur = parse_duration(duration)
+        if not dur:
+            return await ctx.send(embed=err_embed("Invalid duration."))
+        await self._save_gw_template(ctx.guild, name.lower(), {
+            "prize": prize, "duration": dur, "winners_count": winners, "channel_id": channel.id,
+        })
+        await ctx.send(embed=ok_embed(f"Template **{name}** saved."))
+
+    @giveaway.command(name="usetemplate")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def gw_usetemplate(self, ctx, name: str):
+        """Start a giveaway from a template."""
+        template = await self._load_gw_template(ctx.guild, name.lower())
+        if not template:
+            return await ctx.send(embed=err_embed("Template not found."))
+        channel = ctx.guild.get_channel(template["channel_id"])
+        if not channel:
+            return await ctx.send(embed=err_embed("Template channel not found."))
+        gw_id = await self._create_giveaway(ctx, channel, template["prize"], template["duration"], template["winners_count"])
+        await ctx.send(embed=ok_embed(f"Giveaway started from template! ID: `{gw_id}`"))
+
+    @giveaway.command(name="stats")
+    async def gw_stats(self, ctx):
+        """View giveaway statistics."""
+        data = await self.give_config.guild(ctx.guild).all()
+        stats = data.get("stats", {})
+        embed = discord.Embed(title="🎉 Giveaway Stats", colour=Clr.GIVE)
+        embed.add_field(name="Total Hosted", value=str(stats.get("total_hosted", 0)), inline=True)
+        embed.add_field(name="Total Entries", value=str(stats.get("total_entries", 0)), inline=True)
+        embed.add_field(name="Total Winners", value=str(stats.get("total_winners", 0)), inline=True)
+        await ctx.send(embed=embed)
+
     # ══════════════════════════════════════════════════════════════════════════
     # SERVER LOGGING
     # ══════════════════════════════════════════════════════════════════════════
@@ -806,12 +1081,21 @@ class NexusCore(
     @serverlog.command(name="set")
     async def slog_set(self, ctx, event_type: str, channel: discord.TextChannel):
         """Set a specific channel for an event type."""
-        from .serverlog import EVENT_TYPES
         if event_type not in EVENT_TYPES:
-            return await ctx.send(embed=err_embed(f"Valid types: {', '.join(EVENT_TYPES)}"))
+            return await ctx.send(embed=err_embed(f"Valid types: {', '.join(EVENT_TYPES[:10])}... ({len(EVENT_TYPES)} total)"))
         async with self.log_config.guild(ctx.guild).channels() as channels:
             channels[event_type] = channel.id
         await ctx.send(embed=ok_embed(f"`{event_type}` → {channel.mention}"))
+
+    @serverlog.command(name="toggle")
+    async def slog_toggle(self, ctx, event_type: str):
+        """Toggle an event type on/off."""
+        if event_type not in EVENT_TYPES:
+            return await ctx.send(embed=err_embed("Invalid event type."))
+        async with self.log_config.guild(ctx.guild).enabled_events() as events:
+            events[event_type] = not events.get(event_type, True)
+            state = events[event_type]
+        await ctx.send(embed=ok_embed(f"`{event_type}` {'enabled' if state else 'disabled'}"))
 
     @serverlog.command(name="ignore")
     async def slog_ignore(self, ctx, target: discord.TextChannel | discord.Role | discord.Member):
@@ -841,6 +1125,22 @@ class NexusCore(
                     iu.append(target.id)
                     await ctx.send(embed=ok_embed(f"{target.mention} ignored."))
 
+    @serverlog.command(name="events")
+    async def slog_events(self, ctx):
+        """List all event types and their status."""
+        data = await self.log_config.guild(ctx.guild).all()
+        events = data.get("enabled_events", {})
+        lines = []
+        for et in EVENT_TYPES:
+            status = "✅" if events.get(et, True) else "❌"
+            lines.append(f"{status} `{et}`")
+        pages = []
+        for chunk in chunk_list(lines, 15):
+            embed = discord.Embed(title="📋 Log Events", description="\n".join(chunk), colour=Clr.LOG)
+            pages.append(embed)
+        pag = Paginator(pages, author_id=ctx.author.id)
+        await pag.send(ctx)
+
     @serverlog.command(name="settings")
     async def slog_settings(self, ctx):
         """View logging settings."""
@@ -850,13 +1150,14 @@ class NexusCore(
         dc = ctx.guild.get_channel(data["default_channel"]) if data["default_channel"] else None
         embed.add_field(name="Default Channel", value=dc.mention if dc else "Not set", inline=True)
         embed.add_field(name="Ignore Bots", value="✅" if data["ignore_bots"] else "❌", inline=True)
+        embed.add_field(name="Events Tracked", value=f"{sum(1 for v in data.get('enabled_events', {}).values() if v)}/{len(EVENT_TYPES)}", inline=True)
         overrides = []
         for evt, ch_id in data.get("channels", {}).items():
             ch = ctx.guild.get_channel(ch_id)
             if ch:
                 overrides.append(f"`{evt}` → {ch.mention}")
         if overrides:
-            embed.add_field(name="Channel Overrides", value="\n".join(overrides), inline=False)
+            embed.add_field(name="Channel Overrides", value="\n".join(overrides[:10]), inline=False)
         await ctx.send(embed=embed)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -961,8 +1262,7 @@ class NexusCore(
         for n in user_notes[-10:]:
             embed.add_field(
                 name=f"<@{n['author_id']}> · {ts_relative(n['timestamp'])}",
-                value=n["text"][:1024],
-                inline=False,
+                value=n["text"][:1024], inline=False,
             )
         await ctx.send(embed=embed)
 
@@ -978,8 +1278,7 @@ class NexusCore(
         for w in user_warns[-15:]:
             embed.add_field(
                 name=f"Case #{w['id']} · {ts_relative(w['timestamp'])}",
-                value=f"{w['reason']} (by <@{w['mod_id']}>)",
-                inline=False,
+                value=f"{w['reason']} (by <@{w['mod_id']}>)", inline=False,
             )
         embed.set_footer(text=f"Total: {len(user_warns)} warnings")
         await ctx.send(embed=embed)
@@ -1000,19 +1299,53 @@ class NexusCore(
         user_cases = {cid: c for cid, c in cases.items() if c["user_id"] == user.id}
         if not user_cases:
             return await ctx.send(embed=info_embed(f"No cases for {user}."))
-
         pages = []
         for chunk in chunk_list(list(user_cases.items()), 5):
             embed = discord.Embed(title=f"📋 History — {user}", colour=Clr.MOD)
             for cid, c in chunk:
                 embed.add_field(
                     name=f"#{cid} {c['type'].upper()} · {ts_relative(c['timestamp'])}",
-                    value=f"{c['reason'][:200]} (by <@{c['mod_id']}>)",
-                    inline=False,
+                    value=f"{c['reason'][:200]} (by <@{c['mod_id']}>)", inline=False,
                 )
             pages.append(embed)
         pag = Paginator(pages, author_id=ctx.author.id)
         await pag.send(ctx)
+
+    @nmod.command(name="quarantine")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def nmod_quarantine(self, ctx, user: discord.Member, *, reason: str = "Quarantined"):
+        """Quarantine a user (assigns quarantine role)."""
+        case_id = await self._quarantine_user(ctx, user, reason)
+        if case_id:
+            await ctx.send(embed=ok_embed(f"🔒 {user.mention} quarantined (Case #{case_id})"))
+        else:
+            await ctx.send(embed=err_embed("Set quarantine role first: `[p]nmod setquarantine @role`"))
+
+    @nmod.command(name="unquarantine")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def nmod_unquarantine(self, ctx, user: discord.Member, *, reason: str = "Released"):
+        """Release a user from quarantine."""
+        case_id = await self._unquarantine_user(ctx, user, reason)
+        if case_id:
+            await ctx.send(embed=ok_embed(f"🔓 {user.mention} released (Case #{case_id})"))
+        else:
+            await ctx.send(embed=err_embed("No quarantine role set."))
+
+    @nmod.command(name="setquarantine")
+    @checks.admin_or_permissions(administrator=True)
+    async def nmod_setquarantine(self, ctx, role: discord.Role):
+        """Set the quarantine role."""
+        await self.mod_config.guild(ctx.guild).quarantine_role.set(role.id)
+        await ctx.send(embed=ok_embed(f"Quarantine role: {role.mention}"))
+
+    @nmod.command(name="reputation", aliases=["rep"])
+    @checks.mod_or_permissions(manage_messages=True)
+    async def nmod_reputation(self, ctx, user: discord.Member):
+        """View a user's reputation score."""
+        rep = await self._get_reputation(ctx.guild, user)
+        embed = discord.Embed(title=f"📊 Reputation — {user.display_name}", colour=Clr.MOD)
+        embed.add_field(name="Score", value=str(rep), inline=True)
+        await ctx.send(embed=embed)
 
     @nmod.command(name="lockdown")
     @checks.admin_or_permissions(manage_channels=True)
@@ -1048,11 +1381,8 @@ class NexusCore(
     async def nmod_antiraid(self, ctx, enabled: bool, threshold: int = 10, window: int = 10, action: str = "lockdown"):
         """Configure anti-raid: [p]nmod antiraid true 10 10 lockdown"""
         await self.mod_config.guild(ctx.guild).anti_raid.set({
-            "enabled": enabled,
-            "join_threshold": threshold,
-            "join_window": window,
-            "action": action,
-            "notify_channel": ctx.channel.id,
+            "enabled": enabled, "join_threshold": threshold, "join_window": window,
+            "action": action, "notify_channel": ctx.channel.id,
         })
         await ctx.send(embed=ok_embed(f"Anti-raid {'enabled' if enabled else 'disabled'}: {threshold} joins in {window}s → {action}"))
 
@@ -1085,6 +1415,14 @@ class NexusCore(
             esc.setdefault("thresholds", {})[str(warn_count)] = action
         await ctx.send(embed=ok_embed(f"{warn_count} warnings → `{action}`"))
 
+    @nmod.command(name="warndecay")
+    @checks.admin_or_permissions(administrator=True)
+    async def nmod_warndecay(self, ctx, days: int, amount: int = 1):
+        """Set warning decay (days until old warnings are removed)."""
+        await self.mod_config.guild(ctx.guild).warn_decay_days.set(days)
+        await self.mod_config.guild(ctx.guild).warn_decay_amount.set(amount)
+        await ctx.send(embed=ok_embed(f"Warning decay: {amount} warning(s) removed after {days} days" if days else "Decay disabled."))
+
     @nmod.command(name="appeal")
     @checks.admin_or_permissions(administrator=True)
     async def nmod_appeal(self, ctx, channel: discord.TextChannel):
@@ -1093,18 +1431,30 @@ class NexusCore(
         await self.mod_config.guild(ctx.guild).appeal_enabled.set(True)
         await ctx.send(embed=ok_embed(f"Appeals enabled! Channel: {channel.mention}"))
 
+    @nmod.command(name="appealpanel")
+    @checks.admin_or_permissions(administrator=True)
+    async def nmod_appealpanel(self, ctx, channel: discord.TextChannel = None):
+        """Send an appeal button panel."""
+        channel = channel or ctx.channel
+        embed = discord.Embed(
+            title="📨 Appeals",
+            description="Click below to submit an appeal for a moderation action.",
+            colour=Clr.MOD,
+        )
+        from .moderation import AppealButtonView
+        await channel.send(embed=embed, view=AppealButtonView(self))
+        await ctx.send(embed=ok_embed(f"Appeal panel sent to {channel.mention}"))
+
     @nmod.command(name="purge")
     @checks.mod_or_permissions(manage_messages=True)
     async def nmod_purge(self, ctx, count: int, user: discord.Member = None):
         """Purge messages (optionally from a specific user)."""
         if count > 500:
             return await ctx.send(embed=err_embed("Max 500 messages."))
-
         def check(m):
             if user:
                 return m.author.id == user.id
             return True
-
         deleted = await ctx.channel.purge(limit=count, check=check)
         await ctx.send(embed=ok_embed(f"🗑️ Purged {len(deleted)} messages."), delete_after=5)
 
@@ -1124,6 +1474,35 @@ class NexusCore(
                 pass
         await ctx.send(embed=ok_embed(f"Banned {banned}/{len(user_ids)} users."))
 
+    @nmod.command(name="stafflb", aliases=["staffleaderboard"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def nmod_stafflb(self, ctx):
+        """View staff moderation leaderboard."""
+        stats = await self.mod_config.guild(ctx.guild).staff_stats()
+        if not stats:
+            return await ctx.send(embed=info_embed("No staff stats."))
+        sorted_stats = sorted(stats.items(), key=lambda x: sum(x[1].values()), reverse=True)
+        embed = discord.Embed(title="🛡️ Staff Leaderboard", colour=Clr.MOD)
+        for i, (mod_id, s) in enumerate(sorted_stats[:15], 1):
+            member = ctx.guild.get_member(int(mod_id))
+            name = member.display_name if member else f"ID:{mod_id}"
+            total = sum(s.values())
+            embed.add_field(
+                name=f"#{i} {name} — {total} actions",
+                value=f"⚠️ {s.get('warns', 0)} · 🔇 {s.get('mutes', 0)} · 👢 {s.get('kicks', 0)} · 🔨 {s.get('bans', 0)}",
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
+    @nmod.command(name="crossban")
+    @checks.admin_or_permissions(administrator=True)
+    async def nmod_crossban(self, ctx, enabled: bool, webhook_url: str = None):
+        """Enable cross-server ban sync via webhook."""
+        await self.mod_config.guild(ctx.guild).cross_server_ban.set({
+            "enabled": enabled, "webhook_url": webhook_url, "log_only": True,
+        })
+        await ctx.send(embed=ok_embed(f"Cross-server ban sync {'enabled' if enabled else 'disabled'}"))
+
     # ══════════════════════════════════════════════════════════════════════════
     # ECONOMY
     # ══════════════════════════════════════════════════════════════════════════
@@ -1142,13 +1521,13 @@ class NexusCore(
         wallet, bank = await self._get_balance(user)
         data = await self.eco_config.guild(ctx.guild).all()
         emoji = data["currency_emoji"]
-        name = data["currency_name"]
         embed = discord.Embed(title=f"{emoji} {user.display_name}'s Balance", colour=Clr.ECO)
         embed.add_field(name="Wallet", value=f"{emoji} {wallet:,}", inline=True)
         embed.add_field(name="Bank", value=f"{emoji} {bank:,}", inline=True)
         embed.add_field(name="Total", value=f"{emoji} {wallet + bank:,}", inline=True)
         embed.set_thumbnail(url=user.display_avatar.url if user.display_avatar else None)
         await ctx.send(embed=embed)
+        await self._check_millionaire(user)
 
     @eco.command(name="daily")
     async def eco_daily(self, ctx):
@@ -1203,16 +1582,13 @@ class NexusCore(
         wallet = await self.eco_config.member(ctx.author).wallet()
         if amount > wallet:
             return await ctx.send(embed=err_embed("Not enough coins."))
-
         data = await self.eco_config.guild(ctx.guild).all()
         tax = int(amount * data["tax_rate"] / 100)
         received = amount - tax
-
         await self._remove_balance(ctx.author, amount)
         await self._add_balance(user, received)
         await self._add_transaction(ctx.author, -amount, f"Paid {user}")
         await self._add_transaction(user, received, f"Received from {ctx.author}")
-
         desc = f"Sent **{await self._format_amount(ctx.guild, received)}** to {user.mention}"
         if tax:
             desc += f"\n(Tax: {tax:,})"
@@ -1228,25 +1604,18 @@ class NexusCore(
             if total > 0:
                 rankings.append((uid, total))
         rankings.sort(key=lambda x: x[1], reverse=True)
-
         per_page = 10
         start = (page - 1) * per_page
         chunk = rankings[start:start + per_page]
         if not chunk:
             return await ctx.send(embed=info_embed("No data."))
-
         data = await self.eco_config.guild(ctx.guild).all()
         emoji = data["currency_emoji"]
         lines = []
         for i, (uid, total) in enumerate(chunk, start=start + 1):
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"**{i}.**")
             lines.append(f"{medal} <@{uid}> — {emoji} {total:,}")
-
-        embed = discord.Embed(
-            title=f"{emoji} Leaderboard",
-            description="\n".join(lines),
-            colour=Clr.ECO,
-        )
+        embed = discord.Embed(title=f"{emoji} Leaderboard", description="\n".join(lines), colour=Clr.ECO)
         embed.set_footer(text=f"Page {page} · {len(rankings)} total users")
         await ctx.send(embed=embed)
 
@@ -1265,6 +1634,47 @@ class NexusCore(
         """Play blackjack!"""
         await self._blackjack(ctx, bet)
 
+    @eco.command(name="roulette")
+    async def eco_roulette(self, ctx, bet: int, *, choice: str):
+        """Play roulette! Choices: red, black, even, odd, high, low, or 0-36"""
+        await self._roulette(ctx, bet, choice)
+
+    @eco.command(name="dice")
+    async def eco_dice(self, ctx, bet: int, guess: int):
+        """Roll dice! Guess the total (2-12)."""
+        await self._dice(ctx, bet, guess)
+
+    @eco.command(name="fish")
+    async def eco_fish(self, ctx):
+        """Go fishing!"""
+        await self._fish(ctx)
+
+    @eco.command(name="mine")
+    async def eco_mine(self, ctx):
+        """Go mining!"""
+        await self._mine(ctx)
+
+    @eco.command(name="craft")
+    async def eco_craft(self, ctx, *, recipe: str):
+        """Craft an item from materials."""
+        await self._craft(ctx, recipe.lower().replace(" ", "_"))
+
+    @eco.command(name="materials", aliases=["mats"])
+    async def eco_materials(self, ctx, user: discord.Member = None):
+        """View your gathered materials."""
+        user = user or ctx.author
+        mats = await self.eco_config.member(user).materials()
+        if not mats:
+            return await ctx.send(embed=info_embed(f"{user.display_name} has no materials."))
+        data = await self.eco_config.guild(ctx.guild).all()
+        mining_types = data.get("mining", {}).get("ore_types", {})
+        embed = discord.Embed(title=f"⛏️ {user.display_name}'s Materials", colour=Clr.ECO)
+        for mat, count in mats.items():
+            mt = mining_types.get(mat, {})
+            emoji = mt.get("emoji", "📦")
+            embed.add_field(name=f"{emoji} {mat.replace('_', ' ').title()}", value=f"x{count}", inline=True)
+        await ctx.send(embed=embed)
+
     @eco.command(name="shop")
     async def eco_shop(self, ctx):
         """Browse the server shop."""
@@ -1272,7 +1682,6 @@ class NexusCore(
         items = data.get("shop_items", {})
         if not items:
             return await ctx.send(embed=info_embed("Shop is empty!"))
-
         emoji = data["currency_emoji"]
         embed = discord.Embed(title="🛒 Shop", colour=Clr.ECO)
         for iid, item in items.items():
@@ -1282,7 +1691,6 @@ class NexusCore(
                 value=f"{item.get('description', 'No description')}\n{stock_text}",
                 inline=False,
             )
-
         view = ShopView(self, ctx.guild, items)
         await ctx.send(embed=embed, view=view)
 
@@ -1299,7 +1707,7 @@ class NexusCore(
             }
         await ctx.send(embed=ok_embed(f"Item **{name}** added (ID: `{item_id}`, Price: {price:,})"))
 
-    @eco.command(name="addroletiem", aliases=["addroleitem"])
+    @eco.command(name="addroleitem")
     @checks.admin_or_permissions(manage_guild=True)
     async def eco_addroleitem(self, ctx, name: str, price: int, role: discord.Role, *, description: str = ""):
         """Add a role shop item."""
@@ -1348,13 +1756,12 @@ class NexusCore(
         """View your pets."""
         pets = await self.eco_config.member(ctx.author).pets()
         if not pets:
-            guild_data = await self.eco_config.guild(ctx.guild).all()
-            types = guild_data.get("pets", {}).get("types", {})
+            data = await self.eco_config.guild(ctx.guild).all()
+            types = data.get("pets", {}).get("types", {})
             available = "\n".join(f"{v['emoji']} **{k}** — {v['base_price']:,} coins" for k, v in types.items())
             return await ctx.send(embed=info_embed(f"You have no pets.\n\nAvailable:\n{available}\n\nBuy: `[p]eco buypet <type> <name>`"))
-
-        guild_data = await self.eco_config.guild(ctx.guild).all()
-        types = guild_data.get("pets", {}).get("types", {})
+        data = await self.eco_config.guild(ctx.guild).all()
+        types = data.get("pets", {}).get("types", {})
         embed = discord.Embed(title=f"🐾 {ctx.author.display_name}'s Pets", colour=Clr.ECO)
         for name, pet in pets.items():
             pt = types.get(pet["type"], {})
@@ -1381,6 +1788,62 @@ class NexusCore(
     async def eco_collect(self, ctx):
         """Collect earnings from pets."""
         await self._pet_collect(ctx)
+
+    @eco.command(name="gamblestats")
+    async def eco_gamblestats(self, ctx, user: discord.Member = None):
+        """View gambling statistics."""
+        user = user or ctx.author
+        stats = await self.eco_config.member(user).gambling_stats()
+        data = await self.eco_config.guild(ctx.guild).all()
+        emoji = data["currency_emoji"]
+        embed = discord.Embed(title=f"🎰 {user.display_name}'s Gambling Stats", colour=Clr.ECO)
+        embed.add_field(name="Won", value=f"{emoji} {stats.get('won', 0):,}", inline=True)
+        embed.add_field(name="Lost", value=f"{emoji} {stats.get('lost', 0):,}", inline=True)
+        embed.add_field(name="Total Wagered", value=f"{emoji} {stats.get('total_wagered', 0):,}", inline=True)
+        embed.add_field(name="Biggest Win", value=f"{emoji} {stats.get('biggest_win', 0):,}", inline=True)
+        net = stats.get("won", 0) - stats.get("lost", 0)
+        embed.add_field(name="Net", value=f"{emoji} {net:,}", inline=True)
+        await ctx.send(embed=embed)
+
+    @eco.command(name="achievements", aliases=["ach"])
+    async def eco_achievements(self, ctx, user: discord.Member = None):
+        """View achievements."""
+        user = user or ctx.author
+        earned = await self.eco_config.member(user).achievements()
+        data = await self.eco_config.guild(ctx.guild).all()
+        all_achs = data.get("achievements", {})
+        embed = discord.Embed(title=f"🏆 {user.display_name}'s Achievements", colour=Clr.ECO)
+        for aid, ach in all_achs.items():
+            status = "✅" if aid in earned else "🔒"
+            embed.add_field(
+                name=f"{status} {ach.get('emoji', '🏆')} {ach['name']}",
+                value=f"{ach.get('description', '')}" + (f"\nReward: {ach.get('reward', 0):,}" if ach.get("reward") else ""),
+                inline=True,
+            )
+        embed.set_footer(text=f"{len(earned)}/{len(all_achs)} unlocked")
+        await ctx.send(embed=embed)
+
+    @eco.command(name="auction")
+    async def eco_auction(self, ctx):
+        """View the auction house."""
+        data = await self.eco_config.guild(ctx.guild).all()
+        auction_data = data.get("auction", {})
+        if not auction_data.get("enabled"):
+            return await ctx.send(embed=err_embed("Auction house is disabled."))
+        listings = auction_data.get("listings", {})
+        active = {k: v for k, v in listings.items() if not v.get("ended")}
+        if not active:
+            return await ctx.send(embed=info_embed("No active auctions."))
+        embed = discord.Embed(title="🏛️ Auction House", colour=Clr.ECO)
+        for lid, listing in list(active.items())[:10]:
+            embed.add_field(
+                name=f"`{lid}` — {listing['item_name']}",
+                value=f"Current bid: {listing.get('current_bid', listing.get('starting_price', 0)):,}\nSeller: <@{listing['seller_id']}>",
+                inline=True,
+            )
+        from .economy import AuctionListView
+        view = AuctionListView(self, ctx.guild, active)
+        await ctx.send(embed=embed, view=view)
 
     @eco.command(name="setcurrency")
     @checks.admin_or_permissions(manage_guild=True)
@@ -1420,6 +1883,14 @@ class NexusCore(
         await self.eco_config.member(user).clear()
         await ctx.send(embed=ok_embed(f"{user.mention}'s economy data reset."))
 
+    @eco.command(name="incomerole")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def eco_incomerole(self, ctx, role: discord.Role, amount: int, hours: int = 1):
+        """Set passive income for a role."""
+        async with self.eco_config.guild(ctx.guild).income_roles() as ir:
+            ir[str(role.id)] = {"amount": amount, "interval_hours": hours}
+        await ctx.send(embed=ok_embed(f"{role.mention} earns {amount:,} every {hours}h."))
+
     @eco.command(name="settings")
     @checks.admin_or_permissions(manage_guild=True)
     async def eco_settings(self, ctx):
@@ -1427,12 +1898,68 @@ class NexusCore(
         data = await self.eco_config.guild(ctx.guild).all()
         embed = discord.Embed(title="🪙 Economy Settings", colour=Clr.ECO)
         embed.add_field(name="Currency", value=f"{data['currency_emoji']} {data['currency_name']}", inline=True)
-        embed.add_field(name="Daily", value=str(data['daily_amount']), inline=True)
-        embed.add_field(name="Weekly", value=str(data['weekly_amount']), inline=True)
+        embed.add_field(name="Daily", value=f"{data['daily_amount']:,}", inline=True)
+        embed.add_field(name="Weekly", value=f"{data['weekly_amount']:,}", inline=True)
         embed.add_field(name="Work", value=f"{data['work_min']}-{data['work_max']}", inline=True)
         embed.add_field(name="Crime", value=f"{data['crime_min']}-{data['crime_max']} ({data['crime_fail_chance']}% fail)", inline=True)
         embed.add_field(name="Rob", value="✅" if data['rob_enabled'] else "❌", inline=True)
         embed.add_field(name="Tax", value=f"{data['tax_rate']}%", inline=True)
         embed.add_field(name="Interest", value=f"{data['interest_rate']}%", inline=True)
         embed.add_field(name="Shop Items", value=str(len(data.get('shop_items', {}))), inline=True)
+        embed.add_field(name="Fishing", value="✅" if data.get("fishing", {}).get("enabled") else "❌", inline=True)
+        embed.add_field(name="Mining", value="✅" if data.get("mining", {}).get("enabled") else "❌", inline=True)
+        embed.add_field(name="Auction", value="✅" if data.get("auction", {}).get("enabled") else "❌", inline=True)
         await ctx.send(embed=embed)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # EMBED BUILDER
+    # ══════════════════════════════════════════════════════════════════════════
+
+    @commands.group(name="embedbuilder", aliases=["eb"])
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    async def embedbuilder(self, ctx: commands.Context):
+        """📨 Embed Builder — Create custom embeds and send via webhooks."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @embedbuilder.command(name="create")
+    async def eb_create(self, ctx):
+        """Open the interactive embed builder."""
+        await self._open_embed_builder(ctx)
+
+    @embedbuilder.command(name="send")
+    async def eb_send(self, ctx, channel: discord.TextChannel, *, json_data: str = None):
+        """Send an embed via JSON. Supports Discohook JSON format."""
+        if not json_data:
+            return await ctx.send(embed=info_embed("Paste Discohook JSON: `[p]eb send #channel {\"embeds\": [...]}`"))
+        await self._send_json_embed(ctx, channel, json_data)
+
+    @embedbuilder.command(name="webhook")
+    async def eb_webhook(self, ctx, channel: discord.TextChannel, *, name: str = "NexusCore"):
+        """Create/set a webhook for a channel."""
+        await self._setup_webhook(ctx, channel, name)
+
+    @embedbuilder.command(name="templates")
+    async def eb_templates(self, ctx):
+        """List saved embed templates."""
+        await self._list_templates(ctx)
+
+    @embedbuilder.command(name="save")
+    async def eb_save(self, ctx, name: str, *, json_data: str):
+        """Save an embed template."""
+        await self._save_template(ctx, name, json_data)
+
+    @embedbuilder.command(name="load")
+    async def eb_load(self, ctx, name: str, channel: discord.TextChannel):
+        """Load and send a saved template."""
+        await self._load_and_send_template(ctx, name, channel)
+
+    @embedbuilder.command(name="schedule")
+    async def eb_schedule(self, ctx, channel: discord.TextChannel, interval: str, *, json_data: str):
+        """Schedule a recurring embed. Interval: 1h, 6h, 1d, etc."""
+        dur = parse_duration(interval)
+        if not dur:
+            return await ctx.send(embed=err_embed("Invalid interval."))
+        await self._schedule_embed(ctx, channel, dur, json_data)
+        await ctx.send(embed=ok_embed(f"Embed scheduled every {duration_str(dur)} in {channel.mention}"))

@@ -1,422 +1,82 @@
-"""NexusCore — Comprehensive server logging with message cache, event routing, ignore filters."""
+"""NexusCore — Server logging v2: 30+ event types, per-event channels, message cache,
+invite tracking, ignore filters, emoji/thread/sticker/permission/webhook/scheduled event,
+log retention, search, log formatting."""
 
 from __future__ import annotations
 
-import asyncio
-import collections
 import datetime
 from typing import Optional
 
 import discord
 from redbot.core import Config, commands
 
-from .utils import Clr, safe_send, ts_now, ts_relative
+from .utils import (
+    Clr, ok_embed, err_embed, info_embed, ts_now, ts_relative,
+    safe_send, chunk_list,
+)
+
+# ── Event types ────────────────────────────────────────────────────────────
+EVENT_TYPES = [
+    "message_delete", "message_edit", "message_bulk_delete",
+    "member_join", "member_leave", "member_update", "member_ban", "member_unban",
+    "role_create", "role_delete", "role_update",
+    "channel_create", "channel_delete", "channel_update",
+    "voice_join", "voice_leave", "voice_move",
+    "invite_create", "invite_delete",
+    "emoji_update", "sticker_update",
+    "thread_create", "thread_delete", "thread_update",
+    "webhook_update",
+    "scheduled_event_create", "scheduled_event_delete", "scheduled_event_update",
+    "guild_update", "automod_action",
+    "permission_update",
+    "nickname_change",
+    "timeout_add", "timeout_remove",
+]
+
+EVENT_EMOJI = {
+    "message_delete": "🗑️", "message_edit": "✏️", "message_bulk_delete": "🗑️",
+    "member_join": "📥", "member_leave": "📤", "member_update": "👤", "member_ban": "🔨", "member_unban": "🔓",
+    "role_create": "🏷️", "role_delete": "🏷️", "role_update": "🏷️",
+    "channel_create": "📁", "channel_delete": "📁", "channel_update": "📁",
+    "voice_join": "🔊", "voice_leave": "🔇", "voice_move": "🔀",
+    "invite_create": "🔗", "invite_delete": "🔗",
+    "emoji_update": "😀", "sticker_update": "🖼️",
+    "thread_create": "🧵", "thread_delete": "🧵", "thread_update": "🧵",
+    "webhook_update": "🪝", "scheduled_event_create": "📅",
+    "scheduled_event_delete": "📅", "scheduled_event_update": "📅",
+    "guild_update": "⚙️", "automod_action": "🤖",
+    "permission_update": "🔒", "nickname_change": "📝",
+    "timeout_add": "⏰", "timeout_remove": "⏰",
+}
 
 # ── Defaults ───────────────────────────────────────────────────────────────
 LOG_DEFAULTS_GUILD = {
     "enabled": False,
     "default_channel": None,
-    "channels": {},
-    # event_type -> channel_id (override per event)
-    # "message_edit", "message_delete", "bulk_delete",
-    # "member_join", "member_leave", "member_ban", "member_unban",
-    # "member_update", "role_create", "role_delete", "role_update",
-    # "channel_create", "channel_delete", "channel_update",
-    # "voice", "invite", "emoji", "sticker", "thread",
-    # "server_update", "mod_action"
+    "channels": {},  # event_type -> channel_id
     "ignore_channels": [],
     "ignore_roles": [],
     "ignore_users": [],
     "ignore_bots": True,
-    "log_attachments": True,
-    "log_embeds": False,
-    "message_cache_size": 1000,
-    "compact_mode": False,
+    "enabled_events": {e: True for e in EVENT_TYPES},
     "invite_tracking": True,
-    "invites_cache": {},  # code -> {uses, inviter_id}
+    "message_cache_size": 200,
+    "log_retention_days": 0,     # 0 = forever
+    "compact_mode": False,
+    "show_avatar": True,
+    "embed_colour": Clr.LOG.value,
 }
-
-EVENT_TYPES = [
-    "message_edit", "message_delete", "bulk_delete",
-    "member_join", "member_leave", "member_ban", "member_unban",
-    "member_update", "role_create", "role_delete", "role_update",
-    "channel_create", "channel_delete", "channel_update",
-    "voice", "invite", "emoji", "sticker", "thread",
-    "server_update", "mod_action",
-]
 
 
 # ── Mixin ──────────────────────────────────────────────────────────────────
 class ServerLogMixin:
-    """Server logging mixin — handles all Discord events for audit logging."""
+    """Server logging mixin — v2 with 30+ events, retention, search."""
 
-    def _init_logging(self, bot):
-        self.log_config = Config.get_conf(
-            None, identifier=900006, cog_name="NexusCoreLog"
-        )
+    def _init_serverlog(self, bot):
+        self.log_config = Config.get_conf(None, identifier=900006, cog_name="NexusCoreLog")
         self.log_config.register_guild(**LOG_DEFAULTS_GUILD)
-        self._msg_cache = {}  # guild_id -> collections.OrderedDict of msg_id -> {content, author, channel, attachments}
-        self._invite_cache = {}  # guild_id -> {code: uses}
-        self.bot = bot
-
-    def _get_cache(self, guild_id: int) -> collections.OrderedDict:
-        if guild_id not in self._msg_cache:
-            self._msg_cache[guild_id] = collections.OrderedDict()
-        return self._msg_cache[guild_id]
-
-    async def _get_log_channel(self, guild: discord.Guild, event_type: str) -> discord.TextChannel | None:
-        data = await self.log_config.guild(guild).all()
-        if not data["enabled"]:
-            return None
-        ch_id = data["channels"].get(event_type) or data["default_channel"]
-        if not ch_id:
-            return None
-        return guild.get_channel(ch_id)
-
-    async def _should_ignore(self, guild: discord.Guild, *, channel=None, member=None) -> bool:
-        data = await self.log_config.guild(guild).all()
-        if channel and channel.id in data["ignore_channels"]:
-            return True
-        if member:
-            if data["ignore_bots"] and member.bot:
-                return True
-            if member.id in data["ignore_users"]:
-                return True
-            if any(r.id in data["ignore_roles"] for r in getattr(member, "roles", [])):
-                return True
-        return False
-
-    # ── Message cache ──────────────────────────────────────────────────────
-    async def _cache_message(self, message: discord.Message):
-        if not message.guild:
-            return
-        cache = self._get_cache(message.guild.id)
-        cache[message.id] = {
-            "content": message.content,
-            "author_id": message.author.id,
-            "author_str": str(message.author),
-            "channel_id": message.channel.id,
-            "attachments": [a.url for a in message.attachments],
-            "embeds": len(message.embeds),
-        }
-        data = await self.log_config.guild(message.guild).all()
-        max_size = data.get("message_cache_size", 1000)
-        while len(cache) > max_size:
-            cache.popitem(last=False)
-
-    # ── Event handlers ─────────────────────────────────────────────────────
-    async def _log_message_edit(self, before: discord.Message, after: discord.Message):
-        if not after.guild or before.content == after.content:
-            return
-        if await self._should_ignore(after.guild, channel=after.channel, member=after.author):
-            return
-        log_ch = await self._get_log_channel(after.guild, "message_edit")
-        if not log_ch:
-            return
-
-        embed = discord.Embed(
-            title="✏️ Message Edited",
-            colour=discord.Colour(0x3498DB),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        embed.set_author(
-            name=str(after.author),
-            icon_url=after.author.display_avatar.url if after.author.display_avatar else None,
-        )
-        embed.add_field(name="Before", value=(before.content or "*empty*")[:1024], inline=False)
-        embed.add_field(name="After", value=(after.content or "*empty*")[:1024], inline=False)
-        embed.add_field(name="Channel", value=after.channel.mention, inline=True)
-        embed.add_field(name="Author", value=after.author.mention, inline=True)
-        embed.add_field(name="Jump", value=f"[Click]({after.jump_url})", inline=True)
-        embed.set_footer(text=f"Message ID: {after.id} · User ID: {after.author.id}")
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_message_delete(self, message: discord.Message):
-        if not message.guild:
-            return
-        if await self._should_ignore(message.guild, channel=message.channel, member=message.author):
-            return
-        log_ch = await self._get_log_channel(message.guild, "message_delete")
-        if not log_ch:
-            return
-
-        content = message.content or ""
-        # Try cache if content is empty
-        if not content:
-            cached = self._get_cache(message.guild.id).get(message.id)
-            if cached:
-                content = cached.get("content", "")
-
-        embed = discord.Embed(
-            title="🗑️ Message Deleted",
-            colour=discord.Colour(0xE74C3C),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        embed.set_author(
-            name=str(message.author),
-            icon_url=message.author.display_avatar.url if message.author.display_avatar else None,
-        )
-        if content:
-            embed.add_field(name="Content", value=content[:1024], inline=False)
-        embed.add_field(name="Channel", value=message.channel.mention, inline=True)
-        embed.add_field(name="Author", value=message.author.mention, inline=True)
-
-        data = await self.log_config.guild(message.guild).all()
-        if data["log_attachments"] and message.attachments:
-            att_text = "\n".join(f"[{a.filename}]({a.url})" for a in message.attachments[:5])
-            embed.add_field(name="Attachments", value=att_text, inline=False)
-
-        embed.set_footer(text=f"Message ID: {message.id} · User ID: {message.author.id}")
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_bulk_delete(self, messages: list[discord.Message]):
-        if not messages or not messages[0].guild:
-            return
-        guild = messages[0].guild
-        log_ch = await self._get_log_channel(guild, "bulk_delete")
-        if not log_ch:
-            return
-
-        embed = discord.Embed(
-            title="🗑️ Bulk Message Delete",
-            description=f"**{len(messages)}** messages deleted in {messages[0].channel.mention}",
-            colour=discord.Colour(0xE74C3C),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-
-        # Build text file of deleted messages
-        lines = []
-        for m in messages[:200]:
-            ts = m.created_at.strftime("%H:%M:%S")
-            lines.append(f"[{ts}] {m.author}: {m.content or '[no content]'}")
-        content_txt = "\n".join(lines)
-
-        import io
-        file = discord.File(io.BytesIO(content_txt.encode()), filename="bulk_delete.txt")
-        await safe_send(log_ch, embed=embed, file=file)
-
-    async def _log_member_join(self, member: discord.Member):
-        if await self._should_ignore(member.guild, member=member):
-            return
-        log_ch = await self._get_log_channel(member.guild, "member_join")
-        if not log_ch:
-            return
-
-        embed = discord.Embed(
-            title="📥 Member Joined",
-            colour=discord.Colour(0x2ECC71),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        embed.set_author(name=str(member), icon_url=member.display_avatar.url if member.display_avatar else None)
-        embed.add_field(name="User", value=f"{member.mention} (`{member.id}`)", inline=True)
-        embed.add_field(name="Account Created", value=ts_relative(int(member.created_at.timestamp())), inline=True)
-        embed.add_field(name="Member #", value=str(member.guild.member_count), inline=True)
-
-        age_days = (datetime.datetime.now(datetime.timezone.utc) - member.created_at).days
-        if age_days < 7:
-            embed.add_field(name="⚠️ New Account", value=f"Created {age_days} day(s) ago", inline=False)
-
-        embed.set_thumbnail(url=member.display_avatar.url if member.display_avatar else None)
-
-        # Invite tracking
-        data = await self.log_config.guild(member.guild).all()
-        if data.get("invite_tracking"):
-            try:
-                invites = await member.guild.invites()
-                old_cache = self._invite_cache.get(member.guild.id, {})
-                for inv in invites:
-                    old_uses = old_cache.get(inv.code, 0)
-                    if inv.uses > old_uses:
-                        embed.add_field(name="Invited by", value=f"{inv.inviter.mention if inv.inviter else 'Unknown'} (code: `{inv.code}`)", inline=False)
-                        break
-                self._invite_cache[member.guild.id] = {inv.code: inv.uses for inv in invites}
-            except discord.HTTPException:
-                pass
-
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_member_leave(self, member: discord.Member):
-        if await self._should_ignore(member.guild, member=member):
-            return
-        log_ch = await self._get_log_channel(member.guild, "member_leave")
-        if not log_ch:
-            return
-
-        embed = discord.Embed(
-            title="📤 Member Left",
-            colour=discord.Colour(0xE74C3C),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        embed.set_author(name=str(member), icon_url=member.display_avatar.url if member.display_avatar else None)
-        embed.add_field(name="User", value=f"{member.mention} (`{member.id}`)", inline=True)
-        if member.joined_at:
-            embed.add_field(name="Joined", value=ts_relative(int(member.joined_at.timestamp())), inline=True)
-        roles = [r.mention for r in member.roles if r != member.guild.default_role]
-        if roles:
-            embed.add_field(name="Roles", value=", ".join(roles[:20]), inline=False)
-
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_member_ban(self, guild: discord.Guild, user: discord.User):
-        log_ch = await self._get_log_channel(guild, "member_ban")
-        if not log_ch:
-            return
-        embed = discord.Embed(
-            title="🔨 Member Banned",
-            colour=discord.Colour(0xE74C3C),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        embed.set_author(name=str(user), icon_url=user.display_avatar.url if user.display_avatar else None)
-        embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=True)
-
-        try:
-            async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.ban):
-                if entry.target and entry.target.id == user.id:
-                    embed.add_field(name="Banned by", value=entry.user.mention if entry.user else "Unknown", inline=True)
-                    if entry.reason:
-                        embed.add_field(name="Reason", value=entry.reason[:1024], inline=False)
-                    break
-        except discord.HTTPException:
-            pass
-
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_member_unban(self, guild: discord.Guild, user: discord.User):
-        log_ch = await self._get_log_channel(guild, "member_unban")
-        if not log_ch:
-            return
-        embed = discord.Embed(
-            title="🔓 Member Unbanned",
-            description=f"{user.mention} (`{user.id}`)",
-            colour=discord.Colour(0x2ECC71),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_member_update(self, before: discord.Member, after: discord.Member):
-        if await self._should_ignore(after.guild, member=after):
-            return
-        log_ch = await self._get_log_channel(after.guild, "member_update")
-        if not log_ch:
-            return
-
-        changes = []
-
-        if before.nick != after.nick:
-            changes.append(("Nickname", before.nick or "*None*", after.nick or "*None*"))
-
-        added_roles = set(after.roles) - set(before.roles)
-        removed_roles = set(before.roles) - set(after.roles)
-        if added_roles:
-            changes.append(("Roles Added", "", ", ".join(r.mention for r in added_roles)))
-        if removed_roles:
-            changes.append(("Roles Removed", "", ", ".join(r.mention for r in removed_roles)))
-
-        if before.communication_disabled_until != after.communication_disabled_until:
-            if after.communication_disabled_until and after.communication_disabled_until > datetime.datetime.now(datetime.timezone.utc):
-                changes.append(("Timed Out", "No", ts_relative(int(after.communication_disabled_until.timestamp()))))
-            elif before.communication_disabled_until:
-                changes.append(("Timeout Removed", "", ""))
-
-        if not changes:
-            return
-
-        embed = discord.Embed(
-            title="👤 Member Updated",
-            colour=discord.Colour(0xF39C12),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        embed.set_author(name=str(after), icon_url=after.display_avatar.url if after.display_avatar else None)
-        for name, old, new in changes:
-            if old:
-                embed.add_field(name=name, value=f"`{old}` → `{new}`", inline=False)
-            else:
-                embed.add_field(name=name, value=new, inline=False)
-
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_voice(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        if await self._should_ignore(member.guild, member=member):
-            return
-        log_ch = await self._get_log_channel(member.guild, "voice")
-        if not log_ch:
-            return
-
-        if before.channel is None and after.channel:
-            desc = f"🔊 **{member}** joined **{after.channel.name}**"
-            colour = discord.Colour(0x2ECC71)
-        elif before.channel and after.channel is None:
-            desc = f"🔇 **{member}** left **{before.channel.name}**"
-            colour = discord.Colour(0xE74C3C)
-        elif before.channel and after.channel and before.channel != after.channel:
-            desc = f"🔀 **{member}** moved from **{before.channel.name}** → **{after.channel.name}**"
-            colour = discord.Colour(0xF39C12)
-        elif before.self_mute != after.self_mute:
-            desc = f"{'🔇' if after.self_mute else '🔊'} **{member}** {'self-muted' if after.self_mute else 'self-unmuted'}"
-            colour = discord.Colour(0x95A5A6)
-        elif before.self_deaf != after.self_deaf:
-            desc = f"{'🔇' if after.self_deaf else '🔊'} **{member}** {'self-deafened' if after.self_deaf else 'self-undeafened'}"
-            colour = discord.Colour(0x95A5A6)
-        elif before.mute != after.mute:
-            desc = f"{'🔇' if after.mute else '🔊'} **{member}** was {'server muted' if after.mute else 'server unmuted'}"
-            colour = discord.Colour(0xE67E22)
-        elif before.deaf != after.deaf:
-            desc = f"{'🔇' if after.deaf else '🔊'} **{member}** was {'server deafened' if after.deaf else 'server undeafened'}"
-            colour = discord.Colour(0xE67E22)
-        else:
-            return
-
-        embed = discord.Embed(description=desc, colour=colour, timestamp=datetime.datetime.now(datetime.timezone.utc))
-        embed.set_footer(text=f"User ID: {member.id}")
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_channel_create(self, channel: discord.abc.GuildChannel):
-        log_ch = await self._get_log_channel(channel.guild, "channel_create")
-        if not log_ch:
-            return
-        embed = discord.Embed(
-            title="📁 Channel Created",
-            description=f"{channel.mention} (`{channel.name}`)\nType: {str(channel.type).title()}",
-            colour=discord.Colour(0x2ECC71),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_channel_delete(self, channel: discord.abc.GuildChannel):
-        log_ch = await self._get_log_channel(channel.guild, "channel_delete")
-        if not log_ch:
-            return
-        embed = discord.Embed(
-            title="📁 Channel Deleted",
-            description=f"`{channel.name}` ({str(channel.type).title()})",
-            colour=discord.Colour(0xE74C3C),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_role_create(self, role: discord.Role):
-        log_ch = await self._get_log_channel(role.guild, "role_create")
-        if not log_ch:
-            return
-        embed = discord.Embed(
-            title="🏷️ Role Created",
-            description=f"{role.mention} (`{role.name}`)\nColour: `{role.colour}`",
-            colour=role.colour if role.colour.value else discord.Colour(0x2ECC71),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        await safe_send(log_ch, embed=embed)
-
-    async def _log_role_delete(self, role: discord.Role):
-        log_ch = await self._get_log_channel(role.guild, "role_delete")
-        if not log_ch:
-            return
-        embed = discord.Embed(
-            title="🏷️ Role Deleted",
-            description=f"`{role.name}` · Members: {len(role.members)}",
-            colour=discord.Colour(0xE74C3C),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        await safe_send(log_ch, embed=embed)
+        self._message_cache = {}   # guild_id -> {message_id: MessageData}
+        self._invite_cache = {}    # guild_id -> {code: uses}
 
     async def _cache_invites(self, guild: discord.Guild):
         try:
@@ -424,3 +84,398 @@ class ServerLogMixin:
             self._invite_cache[guild.id] = {inv.code: inv.uses for inv in invites}
         except discord.HTTPException:
             pass
+
+    async def _should_log(self, guild: discord.Guild, event_type: str,
+                          channel: discord.abc.GuildChannel | None = None,
+                          member: discord.Member | None = None) -> bool:
+        data = await self.log_config.guild(guild).all()
+        if not data["enabled"]:
+            return False
+        if not data["enabled_events"].get(event_type, True):
+            return False
+        if channel and channel.id in data["ignore_channels"]:
+            return False
+        if member:
+            if data["ignore_bots"] and member.bot:
+                return False
+            if member.id in data["ignore_users"]:
+                return False
+            if any(r.id in data["ignore_roles"] for r in member.roles):
+                return False
+        return True
+
+    async def _get_log_channel(self, guild: discord.Guild, event_type: str) -> discord.TextChannel | None:
+        data = await self.log_config.guild(guild).all()
+        ch_id = data["channels"].get(event_type) or data["default_channel"]
+        if ch_id:
+            return guild.get_channel(ch_id)
+        return None
+
+    async def _log_event(self, guild: discord.Guild, event_type: str,
+                         title: str | None = None, description: str = "",
+                         fields: list[tuple[str, str, bool]] | None = None,
+                         colour: discord.Colour | None = None,
+                         thumbnail: str | None = None, author_name: str | None = None,
+                         author_icon: str | None = None, footer: str | None = None,
+                         channel: discord.abc.GuildChannel | None = None,
+                         member: discord.Member | None = None):
+        if not await self._should_log(guild, event_type, channel, member):
+            return
+        log_ch = await self._get_log_channel(guild, event_type)
+        if not log_ch:
+            return
+
+        data = await self.log_config.guild(guild).all()
+        emoji = EVENT_EMOJI.get(event_type, "📋")
+        c = colour or discord.Colour(data.get("embed_colour", Clr.LOG.value))
+        embed = discord.Embed(colour=c, timestamp=datetime.datetime.now(datetime.timezone.utc))
+        if title:
+            embed.title = f"{emoji} {title}"
+        if description:
+            embed.description = description
+        if fields:
+            for name, value, inline in fields:
+                embed.add_field(name=name, value=str(value)[:1024], inline=inline)
+        if thumbnail and data.get("show_avatar"):
+            embed.set_thumbnail(url=thumbnail)
+        if author_name:
+            embed.set_author(name=author_name, icon_url=author_icon)
+        if footer:
+            embed.set_footer(text=footer)
+        else:
+            embed.set_footer(text=f"{event_type} · {datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M:%S')}")
+
+        await safe_send(log_ch, embed=embed)
+
+    # ── Message events ─────────────────────────────────────────────────────
+    async def _log_message_delete(self, message: discord.Message):
+        if not message.guild:
+            return
+        # Cache message for logging
+        self._cache_message(message)
+        fields = [
+            ("Author", f"{message.author.mention} (`{message.author.id}`)", True),
+            ("Channel", message.channel.mention, True),
+        ]
+        if message.content:
+            fields.append(("Content", message.content[:1024], False))
+        if message.attachments:
+            fields.append(("Attachments", "\n".join(a.url for a in message.attachments), False))
+        await self._log_event(
+            message.guild, "message_delete", title="Message Deleted",
+            fields=fields, colour=Clr.ERROR,
+            thumbnail=message.author.display_avatar.url if message.author.display_avatar else None,
+            channel=message.channel, member=message.author,
+        )
+
+    async def _log_message_edit(self, before: discord.Message, after: discord.Message):
+        if not after.guild or before.content == after.content:
+            return
+        fields = [
+            ("Author", f"{after.author.mention} (`{after.author.id}`)", True),
+            ("Channel", after.channel.mention, True),
+            ("Before", (before.content or "*empty*")[:1024], False),
+            ("After", (after.content or "*empty*")[:1024], False),
+            ("Jump", f"[Click]({after.jump_url})", True),
+        ]
+        await self._log_event(
+            after.guild, "message_edit", title="Message Edited",
+            fields=fields, colour=discord.Colour(0xF1C40F),
+            channel=after.channel, member=after.author,
+        )
+
+    async def _log_bulk_delete(self, messages: list[discord.Message]):
+        if not messages or not messages[0].guild:
+            return
+        guild = messages[0].guild
+        channel = messages[0].channel
+        desc = f"**{len(messages)}** messages deleted in {channel.mention}"
+        await self._log_event(
+            guild, "message_bulk_delete", title="Bulk Message Delete",
+            description=desc, colour=Clr.ERROR, channel=channel,
+        )
+
+    # ── Member events ──────────────────────────────────────────────────────
+    async def _log_member_join(self, member: discord.Member):
+        age = (datetime.datetime.now(datetime.timezone.utc) - member.created_at).days
+        fields = [
+            ("User", f"{member.mention} (`{member.id}`)", True),
+            ("Account Age", f"{age} days", True),
+            ("Member Count", str(member.guild.member_count), True),
+        ]
+        # Invite tracking
+        invite_used = await self._detect_invite(member.guild)
+        if invite_used:
+            fields.append(("Invite Used", f"`{invite_used}`", True))
+        await self._log_event(
+            member.guild, "member_join", title="Member Joined",
+            fields=fields, colour=Clr.SUCCESS,
+            thumbnail=member.display_avatar.url if member.display_avatar else None,
+            member=member,
+        )
+
+    async def _log_member_leave(self, member: discord.Member):
+        roles = [r.mention for r in member.roles if r != member.guild.default_role][:20]
+        fields = [
+            ("User", f"{member} (`{member.id}`)", True),
+            ("Joined", ts_relative(int(member.joined_at.timestamp())) if member.joined_at else "?", True),
+        ]
+        if roles:
+            fields.append(("Roles", " ".join(roles), False))
+        await self._log_event(
+            member.guild, "member_leave", title="Member Left",
+            fields=fields, colour=Clr.ERROR,
+            thumbnail=member.display_avatar.url if member.display_avatar else None,
+        )
+
+    async def _log_member_update(self, before: discord.Member, after: discord.Member):
+        # Role changes
+        added = set(after.roles) - set(before.roles)
+        removed = set(before.roles) - set(after.roles)
+        if added or removed:
+            fields = [("User", after.mention, True)]
+            if added:
+                fields.append(("Roles Added", " ".join(r.mention for r in added), False))
+            if removed:
+                fields.append(("Roles Removed", " ".join(r.mention for r in removed), False))
+            await self._log_event(
+                after.guild, "member_update", title="Member Roles Updated",
+                fields=fields, member=after,
+            )
+
+        # Nickname change
+        if before.nick != after.nick:
+            fields = [
+                ("User", after.mention, True),
+                ("Before", before.nick or before.name, True),
+                ("After", after.nick or after.name, True),
+            ]
+            await self._log_event(
+                after.guild, "nickname_change", title="Nickname Changed",
+                fields=fields, member=after,
+            )
+
+        # Timeout
+        if before.timed_out_until != after.timed_out_until:
+            if after.timed_out_until and after.timed_out_until > datetime.datetime.now(datetime.timezone.utc):
+                fields = [
+                    ("User", after.mention, True),
+                    ("Until", ts_relative(int(after.timed_out_until.timestamp())), True),
+                ]
+                await self._log_event(
+                    after.guild, "timeout_add", title="Member Timed Out",
+                    fields=fields, colour=discord.Colour(0xE74C3C), member=after,
+                )
+            elif before.timed_out_until:
+                await self._log_event(
+                    after.guild, "timeout_remove", title="Timeout Removed",
+                    description=f"{after.mention} timeout removed.", member=after,
+                )
+
+    async def _log_member_ban(self, guild: discord.Guild, user: discord.User):
+        await self._log_event(
+            guild, "member_ban", title="Member Banned",
+            description=f"{user.mention} (`{user.id}`) was banned.",
+            colour=Clr.ERROR,
+            thumbnail=user.display_avatar.url if user.display_avatar else None,
+        )
+
+    async def _log_member_unban(self, guild: discord.Guild, user: discord.User):
+        await self._log_event(
+            guild, "member_unban", title="Member Unbanned",
+            description=f"{user.mention} (`{user.id}`) was unbanned.",
+            colour=Clr.SUCCESS,
+        )
+
+    # ── Channel events ─────────────────────────────────────────────────────
+    async def _log_channel_create(self, channel: discord.abc.GuildChannel):
+        await self._log_event(
+            channel.guild, "channel_create", title="Channel Created",
+            description=f"{channel.mention} (`{channel.name}`)",
+            fields=[("Type", str(channel.type), True)],
+            colour=Clr.SUCCESS,
+        )
+
+    async def _log_channel_delete(self, channel: discord.abc.GuildChannel):
+        await self._log_event(
+            channel.guild, "channel_delete", title="Channel Deleted",
+            description=f"`{channel.name}` (Type: {channel.type})",
+            colour=Clr.ERROR,
+        )
+
+    async def _log_channel_update(self, before, after):
+        changes = []
+        if hasattr(before, "name") and before.name != after.name:
+            changes.append(f"**Name:** {before.name} → {after.name}")
+        if hasattr(before, "topic") and getattr(before, "topic", None) != getattr(after, "topic", None):
+            changes.append(f"**Topic:** {getattr(before, 'topic', '') or '*empty*'} → {getattr(after, 'topic', '') or '*empty*'}")
+        if hasattr(before, "slowmode_delay") and before.slowmode_delay != after.slowmode_delay:
+            changes.append(f"**Slowmode:** {before.slowmode_delay}s → {after.slowmode_delay}s")
+        if hasattr(before, "nsfw") and before.nsfw != after.nsfw:
+            changes.append(f"**NSFW:** {before.nsfw} → {after.nsfw}")
+        if changes:
+            await self._log_event(
+                after.guild, "channel_update", title="Channel Updated",
+                description=f"{after.mention}\n" + "\n".join(changes),
+            )
+
+    # ── Role events ────────────────────────────────────────────────────────
+    async def _log_role_create(self, role: discord.Role):
+        await self._log_event(
+            role.guild, "role_create", title="Role Created",
+            description=f"{role.mention} (`{role.name}`)",
+            colour=Clr.SUCCESS,
+        )
+
+    async def _log_role_delete(self, role: discord.Role):
+        await self._log_event(
+            role.guild, "role_delete", title="Role Deleted",
+            description=f"`{role.name}` (colour: {role.colour})",
+            colour=Clr.ERROR,
+        )
+
+    async def _log_role_update(self, before: discord.Role, after: discord.Role):
+        changes = []
+        if before.name != after.name:
+            changes.append(f"**Name:** {before.name} → {after.name}")
+        if before.colour != after.colour:
+            changes.append(f"**Colour:** {before.colour} → {after.colour}")
+        if before.hoist != after.hoist:
+            changes.append(f"**Hoisted:** {before.hoist} → {after.hoist}")
+        if before.mentionable != after.mentionable:
+            changes.append(f"**Mentionable:** {before.mentionable} → {after.mentionable}")
+        if before.permissions != after.permissions:
+            added = after.permissions.value & ~before.permissions.value
+            removed = before.permissions.value & ~after.permissions.value
+            if added:
+                changes.append(f"**Permissions Added:** `{discord.Permissions(added).value}`")
+            if removed:
+                changes.append(f"**Permissions Removed:** `{discord.Permissions(removed).value}`")
+        if changes:
+            await self._log_event(
+                after.guild, "role_update", title="Role Updated",
+                description=f"{after.mention}\n" + "\n".join(changes),
+            )
+
+    # ── Voice events ───────────────────────────────────────────────────────
+    async def _log_voice_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if before.channel is None and after.channel is not None:
+            await self._log_event(
+                member.guild, "voice_join", title="Voice Join",
+                description=f"{member.mention} joined **{after.channel.name}**",
+                member=member,
+            )
+        elif before.channel is not None and after.channel is None:
+            await self._log_event(
+                member.guild, "voice_leave", title="Voice Leave",
+                description=f"{member.mention} left **{before.channel.name}**",
+                member=member,
+            )
+        elif before.channel != after.channel:
+            await self._log_event(
+                member.guild, "voice_move", title="Voice Move",
+                description=f"{member.mention}: **{before.channel.name}** → **{after.channel.name}**",
+                member=member,
+            )
+
+    # ── Invite events ──────────────────────────────────────────────────────
+    async def _log_invite_create(self, invite: discord.Invite):
+        if not invite.guild:
+            return
+        await self._cache_invites(invite.guild)
+        await self._log_event(
+            invite.guild, "invite_create", title="Invite Created",
+            fields=[
+                ("Code", f"`{invite.code}`", True),
+                ("Created by", invite.inviter.mention if invite.inviter else "?", True),
+                ("Channel", invite.channel.mention if invite.channel else "?", True),
+                ("Max Uses", str(invite.max_uses or "∞"), True),
+                ("Max Age", str(invite.max_age or "∞") + "s", True),
+            ],
+        )
+
+    async def _log_invite_delete(self, invite: discord.Invite):
+        if not invite.guild:
+            return
+        await self._log_event(
+            invite.guild, "invite_delete", title="Invite Deleted",
+            description=f"`{invite.code}`",
+            colour=Clr.ERROR,
+        )
+
+    # ── Thread events ──────────────────────────────────────────────────────
+    async def _log_thread_create(self, thread: discord.Thread):
+        await self._log_event(
+            thread.guild, "thread_create", title="Thread Created",
+            description=f"{thread.mention} in {thread.parent.mention if thread.parent else '?'}",
+            fields=[("Owner", f"<@{thread.owner_id}>", True)],
+        )
+
+    async def _log_thread_delete(self, thread: discord.Thread):
+        await self._log_event(
+            thread.guild, "thread_delete", title="Thread Deleted",
+            description=f"`{thread.name}`",
+            colour=Clr.ERROR,
+        )
+
+    async def _log_thread_update(self, before: discord.Thread, after: discord.Thread):
+        changes = []
+        if before.name != after.name:
+            changes.append(f"**Name:** {before.name} → {after.name}")
+        if before.archived != after.archived:
+            changes.append(f"**Archived:** {before.archived} → {after.archived}")
+        if before.locked != after.locked:
+            changes.append(f"**Locked:** {before.locked} → {after.locked}")
+        if changes:
+            await self._log_event(
+                after.guild, "thread_update", title="Thread Updated",
+                description=f"{after.mention}\n" + "\n".join(changes),
+            )
+
+    # ── Guild events ───────────────────────────────────────────────────────
+    async def _log_guild_update(self, before: discord.Guild, after: discord.Guild):
+        changes = []
+        if before.name != after.name:
+            changes.append(f"**Name:** {before.name} → {after.name}")
+        if before.icon != after.icon:
+            changes.append("**Icon:** Changed")
+        if before.banner != after.banner:
+            changes.append("**Banner:** Changed")
+        if before.verification_level != after.verification_level:
+            changes.append(f"**Verification:** {before.verification_level} → {after.verification_level}")
+        if changes:
+            await self._log_event(
+                after, "guild_update", title="Server Updated",
+                description="\n".join(changes),
+            )
+
+    # ── Utility ────────────────────────────────────────────────────────────
+    def _cache_message(self, message: discord.Message):
+        if not message.guild:
+            return
+        gid = message.guild.id
+        if gid not in self._message_cache:
+            self._message_cache[gid] = {}
+        self._message_cache[gid][message.id] = {
+            "content": message.content, "author_id": message.author.id,
+            "author_name": str(message.author),
+            "channel_id": message.channel.id, "created_at": message.created_at.isoformat(),
+        }
+        cache_limit = 500
+        if len(self._message_cache[gid]) > cache_limit:
+            oldest = list(self._message_cache[gid].keys())[:cache_limit // 2]
+            for key in oldest:
+                del self._message_cache[gid][key]
+
+    async def _detect_invite(self, guild: discord.Guild) -> str | None:
+        """Try to detect which invite was used."""
+        try:
+            old = self._invite_cache.get(guild.id, {})
+            new_invites = await guild.invites()
+            self._invite_cache[guild.id] = {inv.code: inv.uses for inv in new_invites}
+            for inv in new_invites:
+                if inv.code in old and inv.uses > old[inv.code]:
+                    return inv.code
+        except discord.HTTPException:
+            pass
+        return None

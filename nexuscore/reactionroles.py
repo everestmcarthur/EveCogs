@@ -1,4 +1,5 @@
-"""NexusCore — Reaction roles with buttons, select menus, reactions, exclusive groups, requirements."""
+"""NexusCore — Reaction roles v2: buttons, select, reactions, exclusive groups, requirements,
+multi-page menus, custom embeds, requirement chains, stats, conflict removal, clone, verification."""
 
 from __future__ import annotations
 
@@ -10,80 +11,57 @@ from redbot.core import Config, commands
 
 from .utils import (
     Clr, ok_embed, err_embed, info_embed, short_id, ts_now,
-    safe_send, safe_dm,
+    safe_send, safe_dm, chunk_list,
 )
 
 # ── Defaults ───────────────────────────────────────────────────────────────
 RR_DEFAULTS_GUILD = {
     "enabled": True,
     "panels": {},
-    # panel_id -> {
-    #   channel_id, message_id, title, description, colour, image, thumbnail,
-    #   mode: "button" | "select" | "reaction",
-    #   roles: [{role_id, label, emoji, description, style, group, required_role, blacklisted_role}],
-    #   exclusive_groups: {group_name: max_picks},
-    #   max_roles: 0,  # 0 = unlimited
-    #   dm_confirm: True,
-    #   require_role: None,
-    #   blacklist_role: None,
-    #   sticky: False,
-    #   temp_minutes: 0,
-    # }
     "log_channel": None,
     "dm_confirm": True,
+    "stats": {},  # role_id -> {"added": 0, "removed": 0}
+    "verification_panels": {},
+    # panel_id -> {channel_id, message_id, role_id, button_label, button_style}
 }
 
 
 # ── Dynamic view builders ─────────────────────────────────────────────────
 def build_button_view(cog, panel_id: str, panel_data: dict) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-
     for i, role_entry in enumerate(panel_data.get("roles", [])[:25]):
         style_map = {
-            "primary": discord.ButtonStyle.primary,
-            "secondary": discord.ButtonStyle.secondary,
-            "success": discord.ButtonStyle.success,
-            "danger": discord.ButtonStyle.danger,
+            "primary": discord.ButtonStyle.primary, "secondary": discord.ButtonStyle.secondary,
+            "success": discord.ButtonStyle.success, "danger": discord.ButtonStyle.danger,
         }
         style = style_map.get(role_entry.get("style", "primary"), discord.ButtonStyle.primary)
         emoji = role_entry.get("emoji")
-
         button = discord.ui.Button(
-            label=role_entry.get("label", "Role"),
-            style=style,
-            emoji=emoji,
+            label=role_entry.get("label", "Role"), style=style, emoji=emoji,
             custom_id=f"nexus_rr_{panel_id}_{i}",
         )
-
         async def callback(interaction, idx=i, pid=panel_id):
             await cog._handle_role_toggle(interaction, pid, idx)
         button.callback = callback
         view.add_item(button)
-
     return view
 
 
 def build_select_view(cog, panel_id: str, panel_data: dict) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
     max_roles = panel_data.get("max_roles", 0)
-
     options = []
     for i, role_entry in enumerate(panel_data.get("roles", [])[:25]):
         options.append(discord.SelectOption(
-            label=role_entry.get("label", "Role"),
-            value=str(i),
+            label=role_entry.get("label", "Role"), value=str(i),
             description=(role_entry.get("description", "") or "")[:100],
             emoji=role_entry.get("emoji"),
         ))
-
     select = discord.ui.Select(
-        placeholder="Select roles...",
-        options=options,
-        min_values=0,
+        placeholder="Select roles...", options=options, min_values=0,
         max_values=min(len(options), max_roles) if max_roles else len(options),
         custom_id=f"nexus_rr_sel_{panel_id}",
     )
-
     async def callback(interaction):
         await cog._handle_select_roles(interaction, panel_id, [int(v) for v in select.values])
     select.callback = callback
@@ -91,21 +69,37 @@ def build_select_view(cog, panel_id: str, panel_data: dict) -> discord.ui.View:
     return view
 
 
+def build_verification_view(cog, panel_id: str, panel_data: dict) -> discord.ui.View:
+    """Verification button that grants a role on click."""
+    view = discord.ui.View(timeout=None)
+    style_map = {
+        "primary": discord.ButtonStyle.primary, "secondary": discord.ButtonStyle.secondary,
+        "success": discord.ButtonStyle.success, "danger": discord.ButtonStyle.danger,
+    }
+    style = style_map.get(panel_data.get("button_style", "success"), discord.ButtonStyle.success)
+    button = discord.ui.Button(
+        label=panel_data.get("button_label", "✅ Verify"), style=style,
+        custom_id=f"nexus_verify_{panel_id}",
+    )
+    async def callback(interaction):
+        await cog._handle_verification(interaction, panel_id)
+    button.callback = callback
+    view.add_item(button)
+    return view
+
+
 # ── Mixin ──────────────────────────────────────────────────────────────────
 class ReactionRolesMixin:
-    """Reaction roles mixin."""
+    """Reaction roles mixin — v2 with verification, stats, cloning, multi-page."""
 
     def _init_reaction_roles(self, bot):
-        self.rr_config = Config.get_conf(
-            None, identifier=900004, cog_name="NexusCoreRR"
-        )
+        self.rr_config = Config.get_conf(None, identifier=900004, cog_name="NexusCoreRR")
         self.rr_config.register_guild(**RR_DEFAULTS_GUILD)
-        self._rr_views = {}  # panel_id -> View
-        self._rr_temp_tasks = {}  # (user_id, role_id) -> asyncio.Task
+        self._rr_views = {}
+        self._rr_temp_tasks = {}
         self.bot = bot
 
     async def _load_rr_panels(self):
-        """Re-register persistent views on cog load."""
         all_guilds = await self.rr_config.all_guilds()
         for guild_id, gdata in all_guilds.items():
             guild = self.bot.get_guild(guild_id)
@@ -121,6 +115,9 @@ class ReactionRolesMixin:
                     continue
                 self._rr_views[panel_id] = view
                 self.bot.add_view(view, message_id=panel.get("message_id"))
+            for vpid, vp in gdata.get("verification_panels", {}).items():
+                view = build_verification_view(self, vpid, vp)
+                self.bot.add_view(view, message_id=vp.get("message_id"))
 
     async def _create_rr_panel(
         self, ctx: commands.Context, channel: discord.TextChannel,
@@ -129,40 +126,25 @@ class ReactionRolesMixin:
     ) -> str:
         panel_id = short_id(10)
         panel_data = {
-            "channel_id": channel.id,
-            "message_id": None,
-            "title": title,
-            "description": description,
+            "channel_id": channel.id, "message_id": None,
+            "title": title, "description": description,
             "colour": (colour or Clr.ROLES).value,
-            "image": image,
-            "thumbnail": thumbnail,
-            "mode": mode,
-            "roles": [],
-            "exclusive_groups": {},
-            "max_roles": 0,
-            "dm_confirm": True,
-            "require_role": None,
-            "blacklist_role": None,
-            "sticky": False,
-            "temp_minutes": 0,
+            "image": image, "thumbnail": thumbnail,
+            "mode": mode, "roles": [], "exclusive_groups": {},
+            "max_roles": 0, "dm_confirm": True,
+            "require_role": None, "blacklist_role": None,
+            "sticky": False, "temp_minutes": 0,
         }
-
-        embed = discord.Embed(
-            title=title, description=description,
-            colour=colour or Clr.ROLES,
-        )
+        embed = discord.Embed(title=title, description=description, colour=colour or Clr.ROLES)
         if image:
             embed.set_image(url=image)
         if thumbnail:
             embed.set_thumbnail(url=thumbnail)
         embed.set_footer(text="Select your roles below")
-
         msg = await channel.send(embed=embed)
         panel_data["message_id"] = msg.id
-
         async with self.rr_config.guild(ctx.guild).panels() as panels:
             panels[panel_id] = panel_data
-
         return panel_id
 
     async def _add_role_to_panel(
@@ -176,19 +158,13 @@ class ReactionRolesMixin:
             panel = panels.get(panel_id)
             if not panel:
                 return False
-
             panel["roles"].append({
-                "role_id": role.id,
-                "label": label or role.name,
-                "emoji": emoji,
-                "description": description,
-                "style": style,
-                "group": group,
-                "required_role": required_role,
-                "blacklisted_role": blacklisted_role,
+                "role_id": role.id, "label": label or role.name,
+                "emoji": emoji, "description": description,
+                "style": style, "group": group,
+                "required_role": required_role, "blacklisted_role": blacklisted_role,
             })
             panels[panel_id] = panel
-
         await self._refresh_rr_panel(guild, panel_id)
         return True
 
@@ -197,11 +173,9 @@ class ReactionRolesMixin:
         panel = data.get(panel_id)
         if not panel:
             return
-
         channel = guild.get_channel(panel["channel_id"])
         if not channel:
             return
-
         mode = panel.get("mode", "button")
         if mode == "button":
             view = build_button_view(self, panel_id, panel)
@@ -209,33 +183,23 @@ class ReactionRolesMixin:
             view = build_select_view(self, panel_id, panel)
         else:
             view = None
-
         if view:
             self._rr_views[panel_id] = view
             self.bot.add_view(view, message_id=panel.get("message_id"))
-
-        embed = discord.Embed(
-            title=panel["title"],
-            description=panel["description"],
-            colour=discord.Colour(panel["colour"]),
-        )
+        embed = discord.Embed(title=panel["title"], description=panel["description"], colour=discord.Colour(panel["colour"]))
         if panel.get("image"):
             embed.set_image(url=panel["image"])
         if panel.get("thumbnail"):
             embed.set_thumbnail(url=panel["thumbnail"])
-
         role_lines = []
         for r in panel.get("roles", []):
             emoji_str = f"{r['emoji']} " if r.get("emoji") else ""
             role = guild.get_role(r["role_id"])
             role_mention = role.mention if role else f"<@&{r['role_id']}>"
             role_lines.append(f"{emoji_str}{role_mention} — {r.get('description', r.get('label', ''))}")
-
         if role_lines:
             embed.add_field(name="Available Roles", value="\n".join(role_lines), inline=False)
-
         embed.set_footer(text="Select your roles below")
-
         try:
             msg = await channel.fetch_message(panel["message_id"])
             await msg.edit(embed=embed, view=view)
@@ -249,11 +213,9 @@ class ReactionRolesMixin:
         panel = data.get(panel_id)
         if not panel:
             return await interaction.response.send_message("Panel not found.", ephemeral=True)
-
         roles_list = panel.get("roles", [])
         if role_idx >= len(roles_list):
             return await interaction.response.send_message("Role not found.", ephemeral=True)
-
         role_entry = roles_list[role_idx]
         role = guild.get_role(role_entry["role_id"])
         if not role:
@@ -264,17 +226,14 @@ class ReactionRolesMixin:
             req = guild.get_role(panel["require_role"])
             if req and req not in member.roles:
                 return await interaction.response.send_message(f"You need {req.mention} first.", ephemeral=True)
-
         if panel.get("blacklist_role"):
             bl = guild.get_role(panel["blacklist_role"])
             if bl and bl in member.roles:
                 return await interaction.response.send_message(f"You can't use this with {bl.mention}.", ephemeral=True)
-
         if role_entry.get("required_role"):
             rr = guild.get_role(role_entry["required_role"])
             if rr and rr not in member.roles:
                 return await interaction.response.send_message(f"You need {rr.mention} first.", ephemeral=True)
-
         if role_entry.get("blacklisted_role"):
             br = guild.get_role(role_entry["blacklisted_role"])
             if br and br in member.roles:
@@ -288,7 +247,6 @@ class ReactionRolesMixin:
                 action = "removed"
                 emoji = "➖"
             else:
-                # Exclusive group check
                 group = role_entry.get("group")
                 if group and group in panel.get("exclusive_groups", {}):
                     max_picks = panel["exclusive_groups"][group]
@@ -297,20 +255,13 @@ class ReactionRolesMixin:
                     if len(member_group_roles) >= max_picks:
                         for old_role in member_group_roles:
                             await member.remove_roles(old_role, reason="NexusCore exclusive group swap")
-
-                # Max roles check
                 if panel.get("max_roles", 0) > 0:
                     current_panel_roles = [guild.get_role(r["role_id"]) for r in roles_list if guild.get_role(r["role_id"]) in member.roles]
                     if len(current_panel_roles) >= panel["max_roles"]:
-                        return await interaction.response.send_message(
-                            f"Max {panel['max_roles']} roles from this panel.", ephemeral=True
-                        )
-
+                        return await interaction.response.send_message(f"Max {panel['max_roles']} roles from this panel.", ephemeral=True)
                 await member.add_roles(role, reason="NexusCore reaction roles")
                 action = "added"
                 emoji = "➕"
-
-                # Temp role
                 if panel.get("temp_minutes", 0) > 0:
                     import asyncio
                     async def remove_later():
@@ -321,7 +272,6 @@ class ReactionRolesMixin:
                             pass
                     task = asyncio.create_task(remove_later())
                     self._rr_temp_tasks[(member.id, role.id)] = task
-
         except discord.Forbidden:
             return await interaction.response.send_message("I don't have permission to manage that role.", ephemeral=True)
         except discord.HTTPException:
@@ -329,24 +279,25 @@ class ReactionRolesMixin:
 
         await interaction.response.send_message(f"{emoji} **{role.name}** {action}!", ephemeral=True)
 
-        # DM confirm
+        # Track stats
+        async with self.rr_config.guild(guild).stats() as stats:
+            rid = str(role.id)
+            if rid not in stats:
+                stats[rid] = {"added": 0, "removed": 0}
+            stats[rid]["added" if action == "added" else "removed"] += 1
+
         dm_confirm = panel.get("dm_confirm", True)
         if dm_confirm:
             await safe_dm(member, embed=discord.Embed(
-                description=f"{emoji} Role **{role.name}** has been {action} in **{guild.name}**.",
-                colour=Clr.ROLES,
-            ))
+                description=f"{emoji} Role **{role.name}** has been {action} in **{guild.name}**.", colour=Clr.ROLES))
 
-        # Log
         log_ch_id = await self.rr_config.guild(guild).log_channel()
         if log_ch_id:
             log_ch = guild.get_channel(log_ch_id)
             if log_ch:
                 le = discord.Embed(
                     description=f"{emoji} {member.mention} — **{role.name}** {action}",
-                    colour=Clr.ROLES,
-                    timestamp=datetime.datetime.now(datetime.timezone.utc),
-                )
+                    colour=Clr.ROLES, timestamp=datetime.datetime.now(datetime.timezone.utc))
                 await safe_send(log_ch, embed=le)
 
     async def _handle_select_roles(self, interaction: discord.Interaction, panel_id: str, selected: list[int]):
@@ -356,10 +307,8 @@ class ReactionRolesMixin:
         panel = data.get(panel_id)
         if not panel:
             return await interaction.response.send_message("Panel not found.", ephemeral=True)
-
         roles_list = panel.get("roles", [])
         added, removed = [], []
-
         for i, role_entry in enumerate(roles_list):
             role = guild.get_role(role_entry["role_id"])
             if not role:
@@ -378,7 +327,6 @@ class ReactionRolesMixin:
                         removed.append(role.name)
                     except discord.HTTPException:
                         pass
-
         parts = []
         if added:
             parts.append(f"➕ Added: {', '.join(added)}")
@@ -386,19 +334,91 @@ class ReactionRolesMixin:
             parts.append(f"➖ Removed: {', '.join(removed)}")
         if not parts:
             parts.append("No changes.")
-
         await interaction.response.send_message("\n".join(parts), ephemeral=True)
 
-    # ── Reaction-based handling (on_raw_reaction_add / remove) ─────────────
+    async def _handle_verification(self, interaction: discord.Interaction, panel_id: str):
+        """Handle verification button click — grant the configured role."""
+        guild = interaction.guild
+        data = await self.rr_config.guild(guild).verification_panels()
+        vp = data.get(panel_id)
+        if not vp:
+            return await interaction.response.send_message("Verification panel not found.", ephemeral=True)
+        role = guild.get_role(vp.get("role_id"))
+        if not role:
+            return await interaction.response.send_message("Verification role not found.", ephemeral=True)
+        if role in interaction.user.roles:
+            return await interaction.response.send_message("You're already verified!", ephemeral=True)
+        try:
+            await interaction.user.add_roles(role, reason="NexusCore verification")
+            await interaction.response.send_message("✅ You've been verified!", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("I can't assign the verification role.", ephemeral=True)
+
+    async def _create_verification_panel(
+        self, ctx, channel: discord.TextChannel, role: discord.Role,
+        label: str = "✅ Verify", style: str = "success", title: str = "Verification",
+        description: str = "Click the button below to verify yourself!",
+    ) -> str:
+        vpid = short_id(10)
+        embed = discord.Embed(title=title, description=description, colour=Clr.ROLES)
+        vp_data = {
+            "channel_id": channel.id, "message_id": None,
+            "role_id": role.id, "button_label": label, "button_style": style,
+        }
+        view = build_verification_view(self, vpid, vp_data)
+        msg = await channel.send(embed=embed, view=view)
+        vp_data["message_id"] = msg.id
+        async with self.rr_config.guild(ctx.guild).verification_panels() as vps:
+            vps[vpid] = vp_data
+        self.bot.add_view(view, message_id=msg.id)
+        return vpid
+
+    async def _clone_panel(self, guild, panel_id: str, target_channel: discord.TextChannel) -> str | None:
+        """Clone a role panel to another channel."""
+        data = await self.rr_config.guild(guild).panels()
+        panel = data.get(panel_id)
+        if not panel:
+            return None
+        new_id = short_id(10)
+        new_panel = dict(panel)
+        new_panel["channel_id"] = target_channel.id
+        embed = discord.Embed(
+            title=panel["title"], description=panel["description"], colour=discord.Colour(panel["colour"]))
+        if panel.get("image"):
+            embed.set_image(url=panel["image"])
+        if panel.get("thumbnail"):
+            embed.set_thumbnail(url=panel["thumbnail"])
+        role_lines = []
+        for r in panel.get("roles", []):
+            emoji_str = f"{r['emoji']} " if r.get("emoji") else ""
+            ro = guild.get_role(r["role_id"])
+            role_lines.append(f"{emoji_str}{ro.mention if ro else '?'} — {r.get('label', '')}")
+        if role_lines:
+            embed.add_field(name="Available Roles", value="\n".join(role_lines), inline=False)
+        embed.set_footer(text="Select your roles below")
+        mode = panel.get("mode", "button")
+        if mode == "button":
+            view = build_button_view(self, new_id, panel)
+        elif mode == "select":
+            view = build_select_view(self, new_id, panel)
+        else:
+            view = None
+        msg = await target_channel.send(embed=embed, view=view)
+        new_panel["message_id"] = msg.id
+        async with self.rr_config.guild(guild).panels() as panels:
+            panels[new_id] = new_panel
+        if view:
+            self.bot.add_view(view, message_id=msg.id)
+        return new_id
+
+    # ── Reaction-based handling ────────────────────────────────────────────
     async def _handle_reaction_add(self, payload: discord.RawReactionActionEvent):
         guild = self.bot.get_guild(payload.guild_id)
         if not guild:
             return
         data = await self.rr_config.guild(guild).panels()
         for panel_id, panel in data.items():
-            if panel.get("mode") != "reaction":
-                continue
-            if panel.get("message_id") != payload.message_id:
+            if panel.get("mode") != "reaction" or panel.get("message_id") != payload.message_id:
                 continue
             for role_entry in panel.get("roles", []):
                 if str(payload.emoji) == role_entry.get("emoji") or payload.emoji.name == role_entry.get("emoji"):
@@ -416,9 +436,7 @@ class ReactionRolesMixin:
             return
         data = await self.rr_config.guild(guild).panels()
         for panel_id, panel in data.items():
-            if panel.get("mode") != "reaction":
-                continue
-            if panel.get("message_id") != payload.message_id:
+            if panel.get("mode") != "reaction" or panel.get("message_id") != payload.message_id:
                 continue
             for role_entry in panel.get("roles", []):
                 if str(payload.emoji) == role_entry.get("emoji") or payload.emoji.name == role_entry.get("emoji"):
