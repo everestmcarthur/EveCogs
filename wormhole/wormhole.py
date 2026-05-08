@@ -438,6 +438,61 @@ class Wormhole(commands.Cog):
         self.bot.tree.add_command(profile_menu)
         self._ctx_menus.append(profile_menu)
 
+        # ── Standalone slash commands for common operations ──
+        @app_commands.command(name="wormhole-list", description="List all wormhole networks")
+        async def slash_list(interaction: discord.Interaction):
+            ctx = await commands.Context.from_interaction(interaction)
+            await self.wh_list(ctx)
+        self.bot.tree.add_command(slash_list)
+        self._ctx_menus.append(slash_list)  # reuse list for cleanup
+
+        @app_commands.command(name="wormhole-info", description="View wormhole network info")
+        @app_commands.describe(name="Network name")
+        async def slash_info(interaction: discord.Interaction, name: str):
+            ctx = await commands.Context.from_interaction(interaction)
+            await self.wh_info(ctx, name)
+        self.bot.tree.add_command(slash_info)
+        self._ctx_menus.append(slash_info)
+
+        @app_commands.command(name="wormhole-accept", description="View & accept a network's Terms of Service")
+        @app_commands.describe(name="Network name")
+        async def slash_accept(interaction: discord.Interaction, name: str):
+            ctx = await commands.Context.from_interaction(interaction)
+            await self.wh_accept(ctx, name)
+        self.bot.tree.add_command(slash_accept)
+        self._ctx_menus.append(slash_accept)
+
+        @app_commands.command(name="wormhole-agree", description="Confirm acceptance of a network's ToS")
+        @app_commands.describe(name="Network name")
+        async def slash_agree(interaction: discord.Interaction, name: str):
+            ctx = await commands.Context.from_interaction(interaction)
+            await self.wh_agree(ctx, name)
+        self.bot.tree.add_command(slash_agree)
+        self._ctx_menus.append(slash_agree)
+
+        @app_commands.command(name="wormhole-report", description="Report a wormhole message")
+        @app_commands.describe(message_id="Message ID to report", reason="Reason for report")
+        async def slash_report(interaction: discord.Interaction, message_id: str, reason: str = "No reason provided"):
+            ctx = await commands.Context.from_interaction(interaction)
+            await self.wh_report_msg(ctx, int(message_id), reason=reason)
+        self.bot.tree.add_command(slash_report)
+        self._ctx_menus.append(slash_report)
+
+        @app_commands.command(name="wormhole-profile", description="View a user's wormhole profile")
+        @app_commands.describe(name="Network name", user="User to look up (optional)")
+        async def slash_profile(interaction: discord.Interaction, name: str, user: discord.User = None):
+            ctx = await commands.Context.from_interaction(interaction)
+            await self.wh_profile(ctx, name, user)
+        self.bot.tree.add_command(slash_profile)
+        self._ctx_menus.append(slash_profile)
+
+        @app_commands.command(name="wormhole-discover", description="Browse public wormhole networks")
+        async def slash_discover(interaction: discord.Interaction):
+            ctx = await commands.Context.from_interaction(interaction)
+            await self.wh_discover(ctx)
+        self.bot.tree.add_command(slash_discover)
+        self._ctx_menus.append(slash_discover)
+
     async def cog_unload(self):
         self._startup_task.cancel()
         for t in self._bg_tasks:
@@ -906,7 +961,7 @@ class Wormhole(commands.Cog):
 
     # ── Main group ──────────────────────────────────────────────────────────
 
-    @commands.hybrid_group(name="wh", aliases=["wormhole"], invoke_without_command=True, fallback="help_overview")
+    @commands.group(name="wh", aliases=["wormhole"], invoke_without_command=True)
     async def wh(self, ctx: commands.Context):
         """🌀 Wormhole — the ultimate cross-server relay. Use `[p]wh help` for commands."""
         await ctx.send_help(ctx.command)
@@ -4183,7 +4238,7 @@ class Wormhole(commands.Cog):
             f"`bookmark save/list/clear` `colour` `quiet/quiet-off`\n"
             f"`analytics` `health` `bridge add/remove/list`"), inline=False)
 
-        e4 = discord.Embed(title="🌀 Commands (4/4) — Phase 5", colour=COLOUR_NEUTRAL)
+        e4 = discord.Embed(title="🌀 Commands (4/4) — Phase 5 & Slash", colour=COLOUR_NEUTRAL)
         e4.add_field(name="🔔 Mentions (`wh mentions`)", value=(
             f"`set <name> <users|roles|everyone|here> <bool>`\n"
             f"`server-set <name> <type> <bool>` — per-server override\n"
@@ -4206,6 +4261,11 @@ class Wormhole(commands.Cog):
             "• **Wormhole Bookmark** — save a message\n"
             "• **Wormhole Delete** — delete from network (staff)\n"
             "• **Wormhole Profile** — view user profile"), inline=False)
-        e4.set_footer(text="Wormhole v3.4.0 • Hybrid commands (slash + prefix) • EveCogs")
+        e4.add_field(name="⚡ Slash Commands", value=(
+            "`/wormhole-list` `/wormhole-info` `/wormhole-discover`\n"
+            "`/wormhole-accept` `/wormhole-agree` `/wormhole-report`\n"
+            "`/wormhole-profile`\n"
+            "*All other commands available via prefix: `[p]wh`*"), inline=False)
+        e4.set_footer(text="Wormhole v3.4.0 • Slash commands + prefix + context menus • EveCogs")
 
         await ctx.send(embeds=[e1, e2, e3, e4])
