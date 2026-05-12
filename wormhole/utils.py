@@ -215,26 +215,30 @@ def generate_invite_code(length: int = 8) -> str:
 def sanitise_mentions(content: str, config: dict) -> str:
     """Legacy mention control — kept for backwards compatibility."""
     if config.get("strip_everyone"):
-        content = content.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+        content = content.replace("@everyone", "").replace("@here", "")
     if config.get("strip_role_mentions"):
-        content = re.sub(r"<@&(\d+)>", r"@role", content)
+        content = re.sub(r"<@&\d+>\s?", "", content)
     if config.get("strip_user_mentions"):
-        content = re.sub(r"<@!?(\d+)>", r"@user", content)
+        content = re.sub(r"<@!?\d+>\s?", "", content)
+    if content != content:
+        content = re.sub(r"  +", " ", content).strip()
     return content
 
 
 def apply_mention_policy(content: str, policy: dict, author_id: int, exempt_users: list) -> str:
-    """Apply granular mention policy. If the user is exempt, mentions pass through."""
+    """Apply granular mention policy — blocked mentions are stripped entirely."""
     if author_id in exempt_users:
         return content
     if not policy.get("allow_everyone", False):
-        content = content.replace("@everyone", "@\u200beveryone")
+        content = content.replace("@everyone", "")
     if not policy.get("allow_here", False):
-        content = content.replace("@here", "@\u200bhere")
+        content = content.replace("@here", "")
     if not policy.get("allow_role_mentions", False):
-        content = re.sub(r"<@&(\d+)>", "@\u200brole", content)
-    if not policy.get("allow_user_mentions", True):
-        content = re.sub(r"<@!?(\d+)>", "@\u200buser", content)
+        content = re.sub(r"<@&\d+>\s?", "", content)
+    if not policy.get("allow_user_mentions", False):
+        content = re.sub(r"<@!?\d+>\s?", "", content)
+    # Collapse any leftover double-spaces from removals
+    content = re.sub(r"  +", " ", content).strip()
     return content
 
 

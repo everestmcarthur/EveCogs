@@ -243,10 +243,10 @@ _DEFAULT_NETWORK = {
     # ── Phase 5 ──
     # Granular mention policy
     "mention_policy": {
-        "allow_user_mentions": True,   # allow @user pings to relay as real pings
-        "allow_role_mentions": False,  # allow @role pings
-        "allow_everyone": False,       # allow @everyone
-        "allow_here": False,           # allow @here
+        "allow_user_mentions": False,  # strip @user pings from relayed messages
+        "allow_role_mentions": False,  # strip @role pings
+        "allow_everyone": False,       # strip @everyone
+        "allow_here": False,           # strip @here
     },
     "server_mention_overrides": {},    # {guild_id_str: {same keys as mention_policy}}
     "mention_exempt_users": [],        # user IDs allowed to bypass mention policy
