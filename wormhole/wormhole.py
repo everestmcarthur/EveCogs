@@ -25,6 +25,10 @@ Phase 5.1: Relay engine hardening — replaced heuristic command filter with
           Red's internal bot.get_context() (only real commands filtered),
           top-level try/except around entire relay chain, safe AFK/auto-response
           calls, blackout loop no longer overrides manual freeze
+Phase 5.2: Fix empty-prefix bug — get_context() with an empty-string prefix
+          matched every message, silently blocking all relay traffic.  Now
+          requires ctx.prefix to be non-empty before filtering.  Re-added
+          empty-prefix warning to wh debug.
 """
 
 from __future__ import annotations
@@ -373,7 +377,7 @@ class _ReportModal(discord.ui.Modal, title="Report Message"):
 class Wormhole(commands.Cog):
     """The ultimate cross-server relay: networks, DMs, starboard, auto-mod, invites, portals & more."""
 
-    __version__ = "3.4.1"
+    __version__ = "3.4.2"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -3650,7 +3654,11 @@ class Wormhole(commands.Cog):
         if isinstance(pfx, str): pfx = [pfx]
         pfx_display = [f"`{p}`" if p.strip() else f"`(empty)`" for p in pfx[:5]]
         lines.append(f"\n**Prefixes:** {', '.join(pfx_display)}")
-        lines.append("**Command filter:** `bot.get_context()` — only registered commands are skipped")
+        empty_pfx = any(p == "" for p in pfx)
+        if empty_pfx:
+            lines.append("⚠️ **Empty prefix detected!** Messages matching commands via the empty prefix "
+                         "may be incorrectly filtered. Use `[p]set prefix` to remove it.")
+        lines.append("**Command filter:** `bot.get_context()` — only prefixed commands are skipped")
 
         await ctx.send(embed=info_embed("\n".join(lines), title="🔧 Wormhole Debug"))
 
@@ -3685,11 +3693,13 @@ class Wormhole(commands.Cog):
 
         # ── COMMAND FILTERING ───────────────────────────────────────────────
         # Use Red's internal command resolution — only skip messages that are
-        # actual registered bot commands.  No prefix guessing or heuristics.
+        # actual registered bot commands with a real (non-empty) prefix.
+        # An empty-string prefix matches every message, so we must ignore it
+        # to avoid silently dropping all relay traffic.
         if message.content:
             try:
                 ctx = await self.bot.get_context(message)
-                if ctx.valid:
+                if ctx.valid and ctx.prefix:
                     return
             except Exception:
                 pass
