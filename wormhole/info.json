@@ -1,6 +1,6 @@
 {
     "author": ["everestmcarthur"],
-    "install_msg": "Thanks for installing **Wormhole v3.4.2** — the ultimate cross-server relay!\n\nGet started: `[p]wh create <network-name>` then `[p]wh open <network-name>` in channels you want to link.\n\nNew in v3.4.2: Fixed empty-prefix bug that silently blocked all relay traffic. Command filter now correctly ignores empty-string prefixes. v3.4.1: Relay engine hardening — command filter uses Red's internal command resolution (no more dropped messages), top-level error handling, safer background loops.\n\nFull help: `[p]wh help` or `/wh help`",
+    "install_msg": "Thanks for installing **Wormhole v3.4.3** — the ultimate cross-server relay!\n\nGet started: `[p]wh create <network-name>` then `[p]wh open <network-name>` in channels you want to link.\n\nNew in v3.4.3: Fixed critical relay bug — raw string in mention_policy regex replacement caused every message to crash in _do_relay. Also added diagnostic commands (relaydebug, testsend, tracemode). v3.4.2: Fixed empty-prefix command filter. v3.4.1: Relay engine hardening.\n\nFull help: `[p]wh help` or `/wh help`",
     "name": "Wormhole",
     "disabled": false,
     "short": "The ultimate cross-server relay — hybrid commands, context menus, ToS, reports, mentions policy, 85+ commands.",

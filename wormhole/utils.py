@@ -232,9 +232,9 @@ def apply_mention_policy(content: str, policy: dict, author_id: int, exempt_user
     if not policy.get("allow_here", False):
         content = content.replace("@here", "@\u200bhere")
     if not policy.get("allow_role_mentions", False):
-        content = re.sub(r"<@&(\d+)>", r"@\u200brole", content)
+        content = re.sub(r"<@&(\d+)>", "@\u200brole", content)
     if not policy.get("allow_user_mentions", True):
-        content = re.sub(r"<@!?(\d+)>", r"@\u200buser", content)
+        content = re.sub(r"<@!?(\d+)>", "@\u200buser", content)
     return content
 
 
