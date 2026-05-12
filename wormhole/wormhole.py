@@ -250,6 +250,7 @@ _DEFAULT_NETWORK = {
     },
     "server_mention_overrides": {},    # {guild_id_str: {same keys as mention_policy}}
     "mention_exempt_users": [],        # user IDs allowed to bypass mention policy
+    "mention_optout_users": [],        # user IDs who opted out of being @pinged via relay
     # Rules / Terms of Service acceptance gate
     "rules_required": False,           # must users accept before talking?
     "rules_text": "",                  # the legal ToS text
@@ -405,19 +406,19 @@ class Wormhole(commands.Cog):
     async def _init(self):
         try:
             await self.bot.wait_until_ready()
-            # ── Migration: force all mentions stripped on existing networks ──
+            # ── Migration v3.4.3: ensure mention_policy defaults + optout list ──
             async with self.config.networks() as nets:
                 for name, data in nets.items():
                     mp = data.setdefault("mention_policy", {})
                     changed = False
-                    for key in ("allow_user_mentions", "allow_role_mentions", "allow_everyone", "allow_here"):
-                        if mp.get(key) is not False:
+                    # One-time migration: if no _mention_migrated flag, force all off
+                    if not data.get("_mention_migrated"):
+                        for key in ("allow_user_mentions", "allow_role_mentions", "allow_everyone", "allow_here"):
                             mp[key] = False
-                            changed = True
-                    mc = data.get("mention_control", {})
-                    if mc and not mc.get("strip_everyone"):
-                        mc["strip_everyone"] = True
+                        data["_mention_migrated"] = True
                         changed = True
+                    # Ensure optout list exists
+                    data.setdefault("mention_optout_users", [])
                     if changed:
                         log.info("Wormhole migration: disabled all mentions for network '%s'", name)
             networks = await self.config.networks()
@@ -3021,7 +3022,7 @@ class Wormhole(commands.Cog):
         mp = d.get("mention_policy", {})
         sym = lambda v: "✅" if v else "❌"
         lines = [
-            f"**@user mentions:** {sym(mp.get('allow_user_mentions', True))}",
+            f"**@user mentions:** {sym(mp.get('allow_user_mentions', False))}",
             f"**@role mentions:** {sym(mp.get('allow_role_mentions', False))}",
             f"**@everyone:** {sym(mp.get('allow_everyone', False))}",
             f"**@here:** {sym(mp.get('allow_here', False))}",
@@ -3029,7 +3030,12 @@ class Wormhole(commands.Cog):
         exempt = d.get("mention_exempt_users", [])
         if exempt:
             names = [str(self.bot.get_user(uid) or uid) for uid in exempt[:10]]
-            lines.append(f"\n**Exempt users:** {', '.join(names)}")
+            lines.append(f"\n**Exempt users (bypass policy):** {', '.join(names)}")
+        optouts = d.get("mention_optout_users", [])
+        if optouts:
+            names = [str(self.bot.get_user(uid) or uid) for uid in optouts[:10]]
+            extra = f" (+{len(optouts)-10} more)" if len(optouts) > 10 else ""
+            lines.append(f"\n**Opted out of pings ({len(optouts)}):** {', '.join(names)}{extra}")
         overrides = d.get("server_mention_overrides", {})
         if overrides:
             lines.append(f"\n**Server overrides:** {len(overrides)} server(s)")
@@ -3039,6 +3045,63 @@ class Wormhole(commands.Cog):
                 ov_lines = ", ".join(f"{k.replace('allow_', '')}={sym(v)}" for k, v in ov.items())
                 lines.append(f"  • {gname}: {ov_lines}")
         await ctx.send(embed=info_embed("\n".join(lines), title=f"Mention Policy — {name}"))
+
+    @wh_mentions.command(name="optout")
+    async def wh_mentions_optout(self, ctx, name: str):
+        """Opt out of being @pinged through this network's relay.
+
+        Your mentions will be stripped from relayed messages so you won't
+        receive cross-server pings. Use `wh mentions optin` to reverse.
+        """
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Network not found."))
+        uid = ctx.author.id
+        async with self.config.networks() as n:
+            optouts = n[name].setdefault("mention_optout_users", [])
+            if uid in optouts:
+                return await ctx.send(embed=info_embed("You're already opted out of pings on this network."))
+            optouts.append(uid)
+        await ctx.send(embed=ok_embed(
+            f"**{ctx.author.display_name}**, you've opted out of relay pings on **{name}**.\n"
+            "Your @mentions will be stripped from relayed messages. Use `wh mentions optin` to reverse."
+        ))
+
+    @wh_mentions.command(name="optin")
+    async def wh_mentions_optin(self, ctx, name: str):
+        """Opt back in to receiving @pings through this network's relay.
+
+        Only works if user mentions are enabled for the network.
+        """
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Network not found."))
+        uid = ctx.author.id
+        async with self.config.networks() as n:
+            optouts = n[name].setdefault("mention_optout_users", [])
+            if uid not in optouts:
+                return await ctx.send(embed=info_embed("You're already opted in to pings on this network."))
+            optouts.remove(uid)
+        await ctx.send(embed=ok_embed(
+            f"**{ctx.author.display_name}**, you've opted back in to relay pings on **{name}**."
+        ))
+
+    @wh_mentions.command(name="mystatus")
+    async def wh_mentions_mystatus(self, ctx, name: str):
+        """Check your personal mention opt-in/out status for a network."""
+        name = name.lower(); d = await self._net(name)
+        if not d: return await ctx.send(embed=err_embed("Network not found."))
+        uid = ctx.author.id
+        mp = d.get("mention_policy", {})
+        optouts = d.get("mention_optout_users", [])
+        exempt = d.get("mention_exempt_users", [])
+        if uid in exempt:
+            status = "🛡️ You are **exempt** — your mentions always pass through."
+        elif not mp.get("allow_user_mentions", False):
+            status = "🔇 All user mentions are **disabled network-wide** — opt-in/out has no effect."
+        elif uid in optouts:
+            status = "🔕 You are **opted out** — your @mentions are stripped from relayed messages."
+        else:
+            status = "🔔 You are **opted in** (default) — your @mentions are relayed normally."
+        await ctx.send(embed=info_embed(status, title=f"Your Ping Status — {name}"))
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  PHASE 5 — RULES / TERMS OF SERVICE ACCEPTANCE
@@ -4119,8 +4182,9 @@ class Wormhole(commands.Cog):
         server_overrides = nd.get("server_mention_overrides", {}).get(str(message.guild.id))
         active_policy = server_overrides if server_overrides else mp
         exempt = nd.get("mention_exempt_users", [])
+        optouts = set(nd.get("mention_optout_users", []))
         if active_policy:
-            content = apply_mention_policy(message.content or "", active_policy, message.author.id, exempt)
+            content = apply_mention_policy(message.content or "", active_policy, message.author.id, exempt, optouts)
         else:
             mc = nd.get("mention_control", {})
             content = sanitise_mentions(message.content or "", mc)

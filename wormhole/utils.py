@@ -225,8 +225,19 @@ def sanitise_mentions(content: str, config: dict) -> str:
     return content
 
 
-def apply_mention_policy(content: str, policy: dict, author_id: int, exempt_users: list) -> str:
-    """Apply granular mention policy — blocked mentions are stripped entirely."""
+def apply_mention_policy(
+    content: str,
+    policy: dict,
+    author_id: int,
+    exempt_users: list,
+    optout_users: Optional[set] = None,
+) -> str:
+    """Apply granular mention policy — blocked mentions are stripped entirely.
+
+    *optout_users*: set of user IDs who opted out of being pinged.
+    When user mentions are globally allowed, individual opted-out users'
+    mentions are still stripped.
+    """
     if author_id in exempt_users:
         return content
     if not policy.get("allow_everyone", False):
@@ -236,7 +247,14 @@ def apply_mention_policy(content: str, policy: dict, author_id: int, exempt_user
     if not policy.get("allow_role_mentions", False):
         content = re.sub(r"<@&\d+>\s?", "", content)
     if not policy.get("allow_user_mentions", False):
+        # Network-wide: strip ALL user mentions
         content = re.sub(r"<@!?\d+>\s?", "", content)
+    elif optout_users:
+        # User mentions allowed network-wide, but strip opted-out users
+        def _strip_optout(m: re.Match) -> str:
+            uid = int(m.group(1))
+            return "" if uid in optout_users else m.group(0)
+        content = re.sub(r"<@!?(\d+)>", _strip_optout, content)
     # Collapse any leftover double-spaces from removals
     content = re.sub(r"  +", " ", content).strip()
     return content
