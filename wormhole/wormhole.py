@@ -399,6 +399,7 @@ class Wormhole(commands.Cog):
 
         self._ready = asyncio.Event()
         self._bg_tasks: List[asyncio.Task] = []
+        self._trace_channels: set = set()  # channel IDs with live relay tracing
         self._startup_task = asyncio.ensure_future(self._init())
 
     async def _init(self):
@@ -3662,6 +3663,179 @@ class Wormhole(commands.Cog):
 
         await ctx.send(embed=info_embed("\n".join(lines), title="🔧 Wormhole Debug"))
 
+    @wh.command(name="relaydebug", aliases=["rd"])
+    @commands.guild_only()
+    async def wh_relaydebug(self, ctx):
+        """Run every relay gate-check against *this* channel and report the results."""
+        message = ctx.message
+        lines: list[str] = []
+
+        lines.append(f"**Channel:** {ctx.channel.mention} (ID: `{ctx.channel.id}`)")
+
+        eff_ch = message.channel.id
+        is_thread = isinstance(message.channel, discord.Thread)
+        if is_thread:
+            eff_ch = message.channel.parent_id
+            lines.append(f"Thread → parent channel ID: `{eff_ch}`")
+
+        nets = await self.config.networks()
+        net_name = None
+        nd = None
+        for n, d in nets.items():
+            if eff_ch in d.get("channels", []):
+                net_name = n
+                nd = d
+                break
+
+        if not net_name:
+            lines.append("❌ **Channel not found in any network!**")
+            for n, d in nets.items():
+                ch_ids = d.get("channels", [])
+                types = [type(c).__name__ for c in ch_ids]
+                lines.append(f"  `{n}`: channels=`{ch_ids}` types=`{types}`")
+            lines.append(f"  Looking for: `{eff_ch}` (type: `{type(eff_ch).__name__}`)")
+            return await ctx.send(embed=info_embed("\n".join(lines), title="🔍 Relay Debug"))
+
+        lines.append(f"✅ **Network:** `{net_name}`")
+
+        # Frozen
+        lines.append(f"{'❌' if nd.get('frozen') else '✅'} Frozen: {nd.get('frozen', False)}")
+
+        # Thread sync
+        if is_thread:
+            lines.append(f"{'✅' if nd.get('sync_threads') else '❌'} Thread sync: {nd.get('sync_threads', False)}")
+
+        # Mirror
+        is_mirror = eff_ch in nd.get("mirror_channels", [])
+        lines.append(f"{'❌ Channel is receive-only mirror!' if is_mirror else '✅ Not a mirror channel'}")
+
+        # Media-only
+        lines.append(f"{'⚠️ Media-only mode (text dropped)' if nd.get('media_only') else '✅ media_only: off'}")
+
+        # NSFW gate
+        nsfw_gate = nd.get("nsfw_gate", False)
+        ch_nsfw = hasattr(message.channel, "is_nsfw") and message.channel.is_nsfw()
+        if nsfw_gate and ch_nsfw:
+            lines.append("❌ **NSFW gate BLOCKING** — channel is NSFW + nsfw_gate=True")
+        else:
+            lines.append(f"✅ nsfw_gate={nsfw_gate}, channel_nsfw={ch_nsfw}")
+
+        # User / server bans
+        gbu = await self.config.global_banned_users()
+        gbs = await self.config.global_banned_servers()
+        if message.author.id in gbu:
+            lines.append("❌ **User globally banned**")
+        elif message.author.id in nd.get("banned_users", []):
+            lines.append("❌ **User banned in network**")
+        elif message.author.id in nd.get("muted_users", []):
+            lines.append("❌ **User muted in network**")
+        else:
+            lines.append("✅ User not banned/muted")
+
+        if message.guild.id in gbs:
+            lines.append("❌ **Server globally banned**")
+        elif message.guild.id in nd.get("banned_servers", []):
+            lines.append("❌ **Server banned in network**")
+        elif message.guild.id in nd.get("muted_servers", []):
+            lines.append("❌ **Server muted in network**")
+        else:
+            lines.append("✅ Server not banned/muted")
+
+        # Rules gate
+        if nd.get("rules_required"):
+            lines.append(f"{'❌ Rules NOT accepted' if str(message.author.id) not in nd.get('rules_accepted', {}) else '✅ Rules accepted'}")
+        else:
+            lines.append("✅ rules_required: off")
+
+        # Command filter
+        try:
+            test_ctx = await self.bot.get_context(message)
+            if test_ctx.valid and test_ctx.prefix:
+                lines.append(f"⚠️ Command filter: would skip (prefix=`{test_ctx.prefix!r}` cmd=`{test_ctx.command}`)")
+            elif test_ctx.valid:
+                lines.append(f"✅ Command filter: matched empty prefix (ignored, prefix=`{test_ctx.prefix!r}`)")
+            else:
+                lines.append("✅ Command filter: not a command")
+        except Exception as exc:
+            lines.append(f"✅ Command filter: get_context error ({exc})")
+
+        # Relay targets
+        relay_targets = [cid for cid in nd.get("channels", []) if cid != eff_ch]
+        for bn in nd.get("bridge_to", []):
+            bd = nets.get(bn)
+            if bd and not bd.get("frozen"):
+                relay_targets.extend(bd.get("channels", []))
+        if not relay_targets:
+            lines.append("❌ **No relay targets!** Need ≥2 channels in the network")
+        else:
+            lines.append(f"✅ **Relay targets:** {len(relay_targets)}")
+            for cid in relay_targets[:5]:
+                ch = self.bot.get_channel(cid)
+                if ch:
+                    p = ch.permissions_for(ch.guild.me)
+                    lines.append(f"  → #{ch.name} ({ch.guild.name}) wh={'✅' if p.manage_webhooks else '❌'} send={'✅' if p.send_messages else '❌'}")
+                else:
+                    lines.append(f"  → `{cid}` ⚠️ channel not visible to bot")
+
+        # Rate limit
+        bucket = self.cooldowns.get(net_name)
+        if bucket and bucket.is_rate_limited(message.author.id, net_name):
+            lines.append("⚠️ **Rate limited right now**")
+        else:
+            lines.append("✅ Not rate-limited")
+
+        await ctx.send(embed=info_embed("\n".join(lines), title="🔍 Relay Debug"))
+
+    @wh.command(name="testsend")
+    @commands.guild_only()
+    async def wh_testsend(self, ctx, *, text: str = "🧪 Test relay message from Wormhole"):
+        """Bypass on_message and send a test message directly through the relay webhook."""
+        eff_ch = ctx.channel.id
+        nets = await self.config.networks()
+        net_name = None
+        nd = None
+        for n, d in nets.items():
+            if eff_ch in d.get("channels", []):
+                net_name = n; nd = d; break
+        if not net_name:
+            return await ctx.send(embed=err_embed("This channel is not in any wormhole network."))
+
+        relay_targets = [cid for cid in nd.get("channels", []) if cid != eff_ch]
+        if not relay_targets:
+            return await ctx.send(embed=err_embed("No other channels in this network to relay to."))
+
+        results = []
+        for ch_id in relay_targets:
+            ch = self.bot.get_channel(ch_id)
+            if not ch:
+                results.append(f"❌ `{ch_id}` — channel not visible to bot")
+                continue
+            try:
+                wh = await self._wh(ch)
+                await wh.send(
+                    content=text,
+                    username=truncate(ctx.author.display_name, 80),
+                    avatar_url=ctx.author.display_avatar.url,
+                    wait=True,
+                )
+                results.append(f"✅ #{ch.name} ({ch.guild.name}) — webhook send OK")
+            except Exception as exc:
+                results.append(f"❌ #{ch.name} — `{exc}`")
+        await ctx.send(embed=info_embed("\n".join(results), title="🧪 Test Relay Results"))
+
+    @wh.command(name="tracemode")
+    @commands.guild_only()
+    async def wh_tracemode(self, ctx):
+        """Toggle live relay tracing for this channel.  When on, the bot posts a
+        diagnostic embed for every message showing which gate blocked (or passed) it."""
+        cid = ctx.channel.id
+        if cid in self._trace_channels:
+            self._trace_channels.discard(cid)
+            await ctx.send(embed=info_embed("Relay tracing **disabled** for this channel."))
+        else:
+            self._trace_channels.add(cid)
+            await ctx.send(embed=info_embed("Relay tracing **enabled** — send a normal message and check the trace output.\nRun again to disable."))
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  MESSAGE RELAY ENGINE
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3673,6 +3847,11 @@ class Wormhole(commands.Cog):
             return
         if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
             return
+
+        _tracing = message.channel.id in self._trace_channels
+        trace: list[str] = []
+        if _tracing:
+            trace.append("✅ Guild text-channel message from non-bot")
 
         eff_ch = message.channel.id
         is_thread = isinstance(message.channel, discord.Thread)
@@ -3686,10 +3865,29 @@ class Wormhole(commands.Cog):
             if eff_ch in d.get("channels", []):
                 net_name = n; nd = d; break
         if not net_name:
+            if _tracing:
+                trace.append(f"❌ **Channel `{eff_ch}` not in any network**")
+                for n, d in nets.items():
+                    trace.append(f"  `{n}`: `{d.get('channels', [])}`")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
             return
 
-        if is_thread and not nd.get("sync_threads"): return
-        if nd.get("frozen"): return
+        if _tracing:
+            trace.append(f"✅ Network: `{net_name}`")
+
+        if is_thread and not nd.get("sync_threads"):
+            if _tracing:
+                trace.append("❌ **Blocked: thread sync disabled**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
+        if nd.get("frozen"):
+            if _tracing:
+                trace.append("❌ **Blocked: network frozen**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
 
         # ── COMMAND FILTERING ───────────────────────────────────────────────
         # Use Red's internal command resolution — only skip messages that are
@@ -3700,36 +3898,91 @@ class Wormhole(commands.Cog):
             try:
                 ctx = await self.bot.get_context(message)
                 if ctx.valid and ctx.prefix:
+                    if _tracing:
+                        trace.append(f"❌ **Blocked: command filter** prefix=`{ctx.prefix!r}` cmd=`{ctx.command}`")
+                        try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                        except: pass
                     return
+                if _tracing:
+                    trace.append(f"✅ Command filter passed (valid={ctx.valid} prefix={ctx.prefix!r})")
             except Exception:
+                if _tracing:
+                    trace.append("✅ Command filter: get_context errored, continuing")
                 pass
 
         # ── Mirror channel check (receive-only channels don't send) ────────
         if eff_ch in nd.get("mirror_channels", []):
+            if _tracing:
+                trace.append("❌ **Blocked: mirror channel (receive-only)**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
             return
 
         # ── Media-only filter ──────────────────────────────────────────────
         if nd.get("media_only"):
             if not message.attachments and not message.stickers and not (message.embeds and any(e.type in ("image", "video", "gifv") for e in message.embeds)):
+                if _tracing:
+                    trace.append("❌ **Blocked: media_only — no media attached**")
+                    try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                    except: pass
                 return
 
         # NSFW gate
-        if nd.get("nsfw_gate") and hasattr(message.channel, "is_nsfw") and message.channel.is_nsfw(): return
+        if nd.get("nsfw_gate") and hasattr(message.channel, "is_nsfw") and message.channel.is_nsfw():
+            if _tracing:
+                trace.append("❌ **Blocked: NSFW gate — channel is NSFW**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
 
         # Global blocklist
-        if message.author.id in await self.config.global_banned_users(): return
-        if message.guild.id in await self.config.global_banned_servers(): return
+        if message.author.id in await self.config.global_banned_users():
+            if _tracing:
+                trace.append("❌ **Blocked: user globally banned**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
+        if message.guild.id in await self.config.global_banned_servers():
+            if _tracing:
+                trace.append("❌ **Blocked: server globally banned**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
 
         # Per-network checks
-        if message.author.id in nd.get("banned_users", []): return
-        if message.author.id in nd.get("muted_users", []): return
-        if message.guild.id in nd.get("banned_servers", []): return
-        if message.guild.id in nd.get("muted_servers", []): return
+        if message.author.id in nd.get("banned_users", []):
+            if _tracing:
+                trace.append("❌ **Blocked: user banned in network**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
+        if message.author.id in nd.get("muted_users", []):
+            if _tracing:
+                trace.append("❌ **Blocked: user muted in network**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
+        if message.guild.id in nd.get("banned_servers", []):
+            if _tracing:
+                trace.append("❌ **Blocked: server banned in network**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
+        if message.guild.id in nd.get("muted_servers", []):
+            if _tracing:
+                trace.append("❌ **Blocked: server muted in network**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                except: pass
+            return
 
         # Rules acceptance gate (Phase 5)
         if nd.get("rules_required"):
             accepted = nd.get("rules_accepted", {})
             if str(message.author.id) not in accepted:
+                if _tracing:
+                    trace.append("❌ **Blocked: rules not accepted**")
+                    try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
+                    except: pass
                 try:
                     prefix = (await self.bot.get_prefix(message))
                     if isinstance(prefix, list):
@@ -3827,10 +4080,20 @@ class Wormhole(commands.Cog):
         # ── Build payload & relay ──────────────────────────────────────────
         # Top-level safety net: if ANYTHING below throws, log it instead
         # of silently killing the relay for this message.
+        if _tracing:
+            trace.append("✅ All gate checks passed — calling _do_relay")
         try:
             await self._do_relay(net_name, nd, nets, message, eff_ch)
+            if _tracing:
+                trace.append("✅ **_do_relay completed successfully**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace — RELAYED"))
+                except: pass
         except Exception as exc:
             log.error("Relay engine error net=%s ch=%s: %s", net_name, message.channel.id, exc, exc_info=True)
+            if _tracing:
+                trace.append(f"❌ **_do_relay EXCEPTION: `{exc}`**")
+                try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace — ERROR"))
+                except: pass
 
     async def _do_relay(self, net_name: str, nd: dict, nets: dict, message: discord.Message, eff_ch: int):
         """Core relay logic — separated so on_message can wrap it in try/except."""
