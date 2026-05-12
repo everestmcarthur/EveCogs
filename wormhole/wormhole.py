@@ -405,6 +405,21 @@ class Wormhole(commands.Cog):
     async def _init(self):
         try:
             await self.bot.wait_until_ready()
+            # ── Migration: force all mentions stripped on existing networks ──
+            async with self.config.networks() as nets:
+                for name, data in nets.items():
+                    mp = data.setdefault("mention_policy", {})
+                    changed = False
+                    for key in ("allow_user_mentions", "allow_role_mentions", "allow_everyone", "allow_here"):
+                        if mp.get(key) is not False:
+                            mp[key] = False
+                            changed = True
+                    mc = data.get("mention_control", {})
+                    if mc and not mc.get("strip_everyone"):
+                        mc["strip_everyone"] = True
+                        changed = True
+                    if changed:
+                        log.info("Wormhole migration: disabled all mentions for network '%s'", name)
             networks = await self.config.networks()
             for name, data in networks.items():
                 self.cooldowns[name] = CooldownBucket(data.get("rate_limit_rate", 5), data.get("rate_limit_per", 10.0))
@@ -3890,14 +3905,14 @@ class Wormhole(commands.Cog):
             return
 
         # ── COMMAND FILTERING ───────────────────────────────────────────────
-        # Use Red's internal command resolution — only skip messages that are
-        # actual registered bot commands with a real (non-empty) prefix.
-        # An empty-string prefix matches every message, so we must ignore it
-        # to avoid silently dropping all relay traffic.
+        # Use Red's internal command resolution — skip messages that resolve
+        # to a registered bot command.  ctx.valid means both a prefix matched
+        # AND a real command was found, so this works correctly even with an
+        # empty-string prefix (only actual commands are skipped, not all text).
         if message.content:
             try:
                 ctx = await self.bot.get_context(message)
-                if ctx.valid and ctx.prefix:
+                if ctx.valid:
                     if _tracing:
                         trace.append(f"❌ **Blocked: command filter** prefix=`{ctx.prefix!r}` cmd=`{ctx.command}`")
                         try: await message.channel.send(embed=info_embed("\n".join(trace), title="🔍 Trace"))
