@@ -21,6 +21,10 @@ Phase 5: Hybrid commands (slash + prefix), context menu actions, granular
           mention policy (per-network + per-server + per-user), rules/ToS
           acceptance gate, mod edit/delete across network, user report system,
           privacy & security hardening
+Phase 5.1: Relay engine hardening — replaced heuristic command filter with
+          Red's internal bot.get_context() (only real commands filtered),
+          top-level try/except around entire relay chain, safe AFK/auto-response
+          calls, blackout loop no longer overrides manual freeze
 """
 
 from __future__ import annotations
@@ -369,7 +373,7 @@ class _ReportModal(discord.ui.Modal, title="Report Message"):
 class Wormhole(commands.Cog):
     """The ultimate cross-server relay: networks, DMs, starboard, auto-mod, invites, portals & more."""
 
-    __version__ = "3.4.0"
+    __version__ = "3.4.1"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -526,8 +530,11 @@ class Wormhole(commands.Cog):
                                     should = should or (h >= st or h < en)
                         if should and not data.get("frozen"):
                             networks[name]["frozen"] = True
-                        elif not should and data.get("frozen"):
+                            networks[name]["_frozen_by"] = "blackout"
+                        elif not should and data.get("frozen") and data.get("_frozen_by") == "blackout":
+                            # Only unfreeze if the blackout loop froze it — never override manual freeze
                             networks[name]["frozen"] = False
+                            networks[name].pop("_frozen_by", None)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -3643,9 +3650,7 @@ class Wormhole(commands.Cog):
         if isinstance(pfx, str): pfx = [pfx]
         pfx_display = [f"`{p}`" if p.strip() else f"`(empty)`" for p in pfx[:5]]
         lines.append(f"\n**Prefixes:** {', '.join(pfx_display)}")
-        empty_pfx = any(p == "" for p in pfx)
-        if empty_pfx:
-            lines.append("⚠️ **Empty prefix detected!** This would block ALL messages from relay.")
+        lines.append("**Command filter:** `bot.get_context()` — only registered commands are skipped")
 
         await ctx.send(embed=info_embed("\n".join(lines), title="🔧 Wormhole Debug"))
 
@@ -3678,29 +3683,16 @@ class Wormhole(commands.Cog):
         if is_thread and not nd.get("sync_threads"): return
         if nd.get("frozen"): return
 
-        # ── HARDENED COMMAND FILTERING ──────────────────────────────────────
-        # 1. Filter Red bot commands by prefix
+        # ── COMMAND FILTERING ───────────────────────────────────────────────
+        # Use Red's internal command resolution — only skip messages that are
+        # actual registered bot commands.  No prefix guessing or heuristics.
         if message.content:
             try:
-                pfx = await self.bot.get_prefix(message)
-                if isinstance(pfx, str): pfx = [pfx]
-                if any(p and message.content.startswith(p) for p in pfx): return
+                ctx = await self.bot.get_context(message)
+                if ctx.valid:
+                    return
             except Exception:
                 pass
-
-            # 2. Filter common bot command prefixes (!, ?, ., /, -, ~, $, >, ;, ,)
-            _CMD_CHARS = ("!", "?", ".", "/", "-", "~", "$", ">", ";", ",")
-            if len(message.content) >= 2 and message.content[0] in _CMD_CHARS and message.content[1].isalpha():
-                return
-
-            # 3. Filter slash-command style (starts with /)
-            if message.content.startswith("/"):
-                return
-
-            # 4. Filter messages that look like they're invoking a known cog command
-            ctx = await self.bot.get_context(message)
-            if ctx.valid:
-                return
 
         # ── Mirror channel check (receive-only channels don't send) ────────
         if eff_ch in nd.get("mirror_channels", []):
@@ -3811,12 +3803,27 @@ class Wormhole(commands.Cog):
             await asyncio.sleep(min(delay, 30))
 
         # ── AFK system ─────────────────────────────────────────────────────
-        await self._check_afk(net_name, nd, message)
+        try:
+            await self._check_afk(net_name, nd, message)
+        except Exception as exc:
+            log.debug("AFK check error (relay continues): %s", exc)
 
         # ── Auto-responses ─────────────────────────────────────────────────
-        await self._check_auto_responses(net_name, nd, message)
+        try:
+            await self._check_auto_responses(net_name, nd, message)
+        except Exception as exc:
+            log.debug("Auto-response error (relay continues): %s", exc)
 
-        # ── Build payload ──────────────────────────────────────────────────
+        # ── Build payload & relay ──────────────────────────────────────────
+        # Top-level safety net: if ANYTHING below throws, log it instead
+        # of silently killing the relay for this message.
+        try:
+            await self._do_relay(net_name, nd, nets, message, eff_ch)
+        except Exception as exc:
+            log.error("Relay engine error net=%s ch=%s: %s", net_name, message.channel.id, exc, exc_info=True)
+
+    async def _do_relay(self, net_name: str, nd: dict, nets: dict, message: discord.Message, eff_ch: int):
+        """Core relay logic — separated so on_message can wrap it in try/except."""
         relay_mode = nd.get("relay_mode", "webhook")
         nick = nd.get("server_nicknames", {}).get(str(message.guild.id))
         # Mention control — Phase 5 granular policy takes priority, falls back to legacy

@@ -1,6 +1,6 @@
 {
     "author": ["everestmcarthur"],
-    "install_msg": "Thanks for installing **Wormhole v3.4.0** — the ultimate cross-server relay!\n\nGet started: `[p]wh create <network-name>` then `[p]wh open <network-name>` in channels you want to link.\n\nNew in v3.4.0: Hybrid slash+prefix commands, context menu actions, granular mention policy, Terms of Service gate, mod edit/delete across network, report system.\n\nFull help: `[p]wh help` or `/wh help`",
+    "install_msg": "Thanks for installing **Wormhole v3.4.1** — the ultimate cross-server relay!\n\nGet started: `[p]wh create <network-name>` then `[p]wh open <network-name>` in channels you want to link.\n\nNew in v3.4.1: Relay engine hardening — command filter uses Red's internal command resolution (no more dropped messages), top-level error handling, safer background loops.\n\nFull help: `[p]wh help` or `/wh help`",
     "name": "Wormhole",
     "disabled": false,
     "short": "The ultimate cross-server relay — hybrid commands, context menus, ToS, reports, mentions policy, 85+ commands.",
