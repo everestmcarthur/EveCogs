@@ -1,0 +1,27 @@
+{
+    "author": [
+        "everestmcarthur"
+    ],
+    "install_msg": "Thanks for installing **ServerWhitelist**!\n\nAll servers the bot is currently in have been automatically whitelisted.\n\n**Usage (bot owner only):**\n• `[p]join <server_id>` — Add a server to the whitelist so the bot can stay when invited.\n• `[p]join remove <server_id>` — Remove a server from the whitelist (the bot will leave it).\n• `[p]join list` — View every whitelisted server.\n\nAny server **not** on the whitelist will be left automatically when the bot joins.",
+    "name": "ServerWhitelist",
+    "disabled": false,
+    "short": "Restrict which servers the bot is allowed to stay in via an owner-only whitelist.",
+    "description": "ServerWhitelist lets the bot owner control exactly which Discord servers the bot is permitted to operate in. On first load every server the bot is already in is auto-whitelisted. The hybrid command [p]join <id> adds a new server ID to the list. When the bot joins a server that is not whitelisted it immediately leaves. Subcommands let the owner remove servers and view the full whitelist. Only the bot owner can use these commands.",
+    "tags": [
+        "whitelist",
+        "server",
+        "owner",
+        "security",
+        "join",
+        "management"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores guild IDs in a global whitelist. No per-user data is collected or stored.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [
+        3,
+        9,
+        0
+    ],
+    "requirements": []
+}
