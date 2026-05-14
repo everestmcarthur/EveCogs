@@ -45,6 +45,7 @@ class UserSlash(commands.Cog):
         self.config.register_global(
             whitelist_enabled=False,
             whitelisted_users=[],
+            description="",
         )
 
     # ------------------------------------------------------------------
@@ -73,6 +74,11 @@ class UserSlash(commands.Cog):
         """Wait for the bot to be fully ready, then register the slash command."""
         await self.bot.wait_until_red_ready()
         assert self.bot.user
+
+        # Apply custom description if set
+        custom_desc = await self.config.description()
+        if custom_desc:
+            user_slash_command.description = custom_desc
 
         # Apply native user-install flags (discord.py 2.4+)
         apply_user_install_native(user_slash_command)
@@ -242,6 +248,35 @@ class UserSlash(commands.Cog):
             length += len(line) + 1
         if page:
             await ctx.send("\n".join(page))
+
+    @_userslash.command(name="setdescription", aliases=["setdesc"])
+    async def _setdesc(self, ctx: commands.Context, *, description: str = "") -> None:
+        """Set a custom description for the slash command.
+
+        The description appears under the ``/botname`` command in the Discord UI.
+        Pass no argument (or an empty string) to reset to the default.
+
+        Run ``[p]userslash sync`` afterwards to push the change to Discord.
+
+        Example: ``[p]userslash setdescription Shine bright like a Ruby``
+        """
+        if not description.strip():
+            await self.config.description.set("")
+            user_slash_command.description = (
+                "Shine bright like a Ruby"
+            )
+            await ctx.send(
+                "✅ Description reset to default.  "
+                "Run `[p]userslash sync` to push the change."
+            )
+        else:
+            description = description[:100]  # Discord limit
+            await self.config.description.set(description)
+            user_slash_command.description = description
+            await ctx.send(
+                f"✅ Description set to: *{description}*\n"
+                "Run `[p]userslash sync` to push the change."
+            )
 
     # ------------------------------------------------------------------
     # Whitelist commands

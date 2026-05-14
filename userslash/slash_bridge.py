@@ -31,6 +31,57 @@ LOG = logging.getLogger("red.evecogs.userslash.slash_bridge")
 
 
 # ------------------------------------------------------------------
+# Context helpers
+# ------------------------------------------------------------------
+
+def _is_user_install_context(interaction: discord.Interaction) -> bool:
+    """True when the interaction originates outside a guild the bot is a member of."""
+    return not interaction.guild or not getattr(interaction.guild, "me", None)
+
+
+def _command_needs_guild(cmd: commands.Command) -> bool:
+    """Heuristic: return True if *cmd* almost certainly requires a guild context.
+
+    Walks the parent chain so subcommands inherit their parent's requirements.
+    Checks:
+    - ``@commands.guild_only()`` / ``@commands.no_pm()`` in discord.py checks
+    - Red privilege levels (MOD, ADMIN, GUILD_OWNER)
+    - Explicit ``user_perms`` on Red's ``Requires`` object
+    """
+    current: Optional[commands.Command] = cmd
+    while current is not None:
+        # discord.py @guild_only() / @no_pm()
+        for check in getattr(current, "checks", ()):
+            qn = getattr(check, "__qualname__", "")
+            if "guild_only" in qn or "no_pm" in qn:
+                return True
+
+        # Red's Requires system
+        requires = getattr(current, "requires", None)
+        if requires is not None:
+            # MOD=1, ADMIN=2, GUILD_OWNER=3 all require a guild
+            priv = getattr(requires, "privilege_level", None)
+            if priv is not None:
+                try:
+                    if priv.value in (1, 2, 3):
+                        return True
+                except (AttributeError, ValueError):
+                    pass
+
+            # Explicit user-permission requirements (manage_guild, etc.)
+            user_perms = getattr(requires, "user_perms", None)
+            if user_perms is not None:
+                try:
+                    if isinstance(user_perms, discord.Permissions) and user_perms.value != 0:
+                        return True
+                except Exception:
+                    pass
+
+        current = getattr(current, "parent", None)
+    return False
+
+
+# ------------------------------------------------------------------
 # Whitelist helper
 # ------------------------------------------------------------------
 
@@ -69,7 +120,7 @@ async def user_slash_command(
     attachment: Optional[discord.Attachment] = None,
 ) -> None:
     """
-    Run any bot command from anywhere — servers, DMs, and group DMs.
+    Shine bright like a Ruby
 
     Parameters
     -----------
@@ -92,6 +143,18 @@ async def user_slash_command(
                 ephemeral=True,
             )
         return
+
+    # --- Block guild-only commands in user-install contexts ---
+    if _is_user_install_context(interaction):
+        probe = interaction.client.get_command(command)
+        if probe and _command_needs_guild(probe):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ `{command}` requires a server context and can't be "
+                    "used in DMs, group DMs, or servers the bot isn't in.",
+                    ephemeral=True,
+                )
+            return
 
     actual = interaction.client.get_command(command)
     ctx = await InterContext.from_interaction(interaction, recreate_message=True)
@@ -202,26 +265,47 @@ async def _autocomplete(
         # Fallback settings when guild config is unavailable
         help_settings = await HelpSettings.from_context.__wrapped__(ctx)  # type: ignore
 
+    user_install = _is_user_install_context(interaction)
+    show_hidden = help_settings.show_hidden
+
+    # Build the candidate pool — in user-install contexts, pre-filter to
+    # commands that can actually work outside a guild.
+    all_names = list(
+        walk_aliases(interaction.client, show_hidden=show_hidden)
+    )
+
+    if user_install:
+        pool: List[str] = []
+        for n in all_names:
+            cmd = interaction.client.get_command(n)
+            if cmd and not _command_needs_guild(cmd):
+                pool.append(n)
+    else:
+        pool = all_names
+
     if current:
         extracted = cast(
             List[str],
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 heapq.nlargest,
-                6,
-                walk_aliases(
-                    interaction.client, show_hidden=help_settings.show_hidden
-                ),
+                24 if user_install else 6,
+                pool,
                 functools.partial(fuzz.token_sort_ratio, current),
             ),
         )
         extracted.append("help")
     else:
-        extracted = ["help"]
+        if user_install:
+            # Show available DM-compatible commands when nothing is typed yet
+            extracted = pool[:24]
+            extracted.append("help")
+        else:
+            extracted = ["help"]
 
     _filter: Callable[[commands.Command], Awaitable[bool]] = (
         operator.methodcaller(
-            "can_run" if help_settings.show_hidden else "can_see", ctx
+            "can_run" if show_hidden else "can_see", ctx
         )
     )
     matches: Dict[commands.Command, str] = {}
