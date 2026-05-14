@@ -4238,10 +4238,22 @@ class Wormhole(commands.Cog):
                         if orig_ref_id
                         else self.msg_map.forward.get(net_name, {}).get(ref.id, {})
                     )
+                    # Map each relay-target channel to its local copy
                     for cid, mid in ref_relayed.items():
                         target_ch = self.bot.get_channel(cid)
                         if target_ch and target_ch.guild:
                             reply_jump_urls[cid] = f"https://discord.com/channels/{target_ch.guild.id}/{cid}/{mid}"
+                    # Map the source channel (where the original was typed).
+                    # The forward map only stores relay targets — the source
+                    # channel is whichever network channel is NOT in the map.
+                    if orig_ref_id:
+                        # ref was a relayed copy — find the original's channel
+                        relayed_ch_ids = set(ref_relayed.keys())
+                        for net_ch_id in nd.get("channels", []):
+                            if net_ch_id not in relayed_ch_ids and net_ch_id not in reply_jump_urls:
+                                net_ch = self.bot.get_channel(net_ch_id)
+                                if net_ch and net_ch.guild:
+                                    reply_jump_urls[net_ch_id] = f"https://discord.com/channels/{net_ch.guild.id}/{net_ch_id}/{orig_ref_id}"
                     # Include the channel where the ref message lives
                     reply_jump_urls.setdefault(ref.channel.id, reply_fallback_url)
             except: content = f"> ↩ *[reply]*\n{content}"
