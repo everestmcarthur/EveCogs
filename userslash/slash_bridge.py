@@ -4,6 +4,9 @@ The proxy slash command and its autocomplete / error handler.
 This is the heart of UserSlash: a single ``/botname`` command that bridges
 *every* Red text command through Discord's slash-command interface, with
 full support for DM / group-DM / non-member-guild contexts.
+
+Renamed from ``commands.py`` to ``slash_bridge.py`` to avoid shadowing
+``redbot.core.commands`` inside the package.
 """
 
 import asyncio
@@ -24,7 +27,34 @@ from redbot.core.i18n import set_contextual_locale
 from .context import InterContext
 from .utils import walk_aliases
 
-LOG = logging.getLogger("red.evecogs.userslash.commands")
+LOG = logging.getLogger("red.evecogs.userslash.slash_bridge")
+
+
+# ------------------------------------------------------------------
+# Whitelist helper
+# ------------------------------------------------------------------
+
+async def _check_whitelist(interaction: discord.Interaction) -> bool:
+    """Return True if the user is allowed, False if blocked by the whitelist.
+
+    The whitelist only applies to *user-install* contexts (no guild, or a guild
+    the bot isn't a member of).  Guild-installed usage is always permitted.
+    """
+    config = getattr(
+        interaction.command, "extras", {}
+    ).get("_userslash_config")
+    if config is None:
+        return True  # config not wired yet — allow
+
+    # If the bot is a full member of this guild, skip the whitelist
+    if interaction.guild and interaction.guild.me:
+        return True
+
+    if not await config.whitelist_enabled():
+        return True
+
+    whitelist: list = await config.whitelisted_users()
+    return interaction.user.id in whitelist
 
 
 # ------------------------------------------------------------------
@@ -52,6 +82,16 @@ async def user_slash_command(
     """
     assert isinstance(interaction.client, Red)
     set_contextual_locale(str(interaction.guild_locale or interaction.locale))
+
+    # --- Whitelist gate ---
+    if not await _check_whitelist(interaction):
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ You are not authorised to use this bot via user-install. "
+                "Ask a bot owner to add you with `[p]userslash whitelist add`.",
+                ephemeral=True,
+            )
+        return
 
     actual = interaction.client.get_command(command)
     ctx = await InterContext.from_interaction(interaction, recreate_message=True)
@@ -130,6 +170,10 @@ async def _autocomplete(
     interaction: discord.Interaction, current: str
 ) -> List[app_commands.Choice[str]]:
     assert isinstance(interaction.client, Red)
+
+    # --- Whitelist gate ---
+    if not await _check_whitelist(interaction):
+        return []
 
     try:
         if not await interaction.client.allowed_by_whitelist_blacklist(

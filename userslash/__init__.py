@@ -8,9 +8,10 @@ automatically patched with ``integration_types: [0, 1]`` and
 ``contexts: [0, 1, 2]`` so the bot works as a user-installable app.
 
 Owner commands:
-    [p]userslash sync   — Sync the command tree + patch user-install flags
-    [p]userslash patch  — Patch flags on already-synced commands
-    [p]userslash status — Show per-command user-install status
+    [p]userslash sync      — Sync the command tree + patch user-install flags
+    [p]userslash patch     — Patch flags on already-synced commands
+    [p]userslash status    — Show per-command user-install status
+    [p]userslash whitelist — Manage the user-install whitelist
 """
 
 import asyncio
@@ -18,11 +19,11 @@ import logging
 from typing import Optional
 
 import discord
-from redbot.core import app_commands, commands
+from redbot.core import Config, app_commands, commands
 from redbot.core.bot import Red
 from redbot.core.errors import CogLoadError
 
-from .commands import user_slash_command
+from .slash_bridge import user_slash_command
 from .context import InterContext
 from .patcher import apply_user_install_native, patch_all_commands
 from .utils import valid_app_name
@@ -40,12 +41,19 @@ class UserSlash(commands.Cog):
     def __init__(self, bot: Red):
         self.bot = bot
         self._slash_registered = False
+        self.config = Config.get_conf(self, identifier=0x55534C41534800, force_registration=True)
+        self.config.register_global(
+            whitelist_enabled=False,
+            whitelisted_users=[],
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def cog_load(self) -> None:
+        # Expose config to the slash bridge module for whitelist checks
+        user_slash_command.extras["_userslash_config"] = self.config
         self.bot.before_invoke(self._before_hook)
         self.bot.add_dev_env_value(
             "interaction", lambda ctx: getattr(ctx, "interaction", None)
@@ -234,6 +242,108 @@ class UserSlash(commands.Cog):
             length += len(line) + 1
         if page:
             await ctx.send("\n".join(page))
+
+    # ------------------------------------------------------------------
+    # Whitelist commands
+    # ------------------------------------------------------------------
+
+    @_userslash.group(name="whitelist", aliases=["wl"])
+    async def _whitelist(self, ctx: commands.Context) -> None:
+        """Manage the user-install whitelist.
+
+        When enabled, only whitelisted users can use the bot via user-install
+        (DMs, group DMs, and non-member guilds).  Guild-installed usage is
+        unaffected.
+        """
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @_whitelist.command(name="enable")
+    async def _wl_enable(self, ctx: commands.Context) -> None:
+        """Enable the user-install whitelist."""
+        await self.config.whitelist_enabled.set(True)
+        await ctx.send("✅ User-install whitelist is now *enabled*. Only whitelisted users can use the bot outside of guilds.")
+
+    @_whitelist.command(name="disable")
+    async def _wl_disable(self, ctx: commands.Context) -> None:
+        """Disable the user-install whitelist (anyone can use user-install)."""
+        await self.config.whitelist_enabled.set(False)
+        await ctx.send("✅ User-install whitelist is now *disabled*. Anyone can use the bot via user-install.")
+
+    @_whitelist.command(name="add")
+    async def _wl_add(self, ctx: commands.Context, *users: discord.User) -> None:
+        """Add one or more users to the whitelist.
+
+        Example: `[p]userslash whitelist add @User1 @User2`
+        """
+        if not users:
+            await ctx.send("❌ Provide at least one user to add.")
+            return
+        async with self.config.whitelisted_users() as wl:
+            added = []
+            for user in users:
+                if user.id not in wl:
+                    wl.append(user.id)
+                    added.append(str(user))
+            if added:
+                await ctx.send(f"✅ Added to whitelist: {', '.join(added)}")
+            else:
+                await ctx.send("ℹ️ All specified users are already whitelisted.")
+
+    @_whitelist.command(name="remove", aliases=["rm"])
+    async def _wl_remove(self, ctx: commands.Context, *users: discord.User) -> None:
+        """Remove one or more users from the whitelist.
+
+        Example: `[p]userslash whitelist remove @User1`
+        """
+        if not users:
+            await ctx.send("❌ Provide at least one user to remove.")
+            return
+        async with self.config.whitelisted_users() as wl:
+            removed = []
+            for user in users:
+                if user.id in wl:
+                    wl.remove(user.id)
+                    removed.append(str(user))
+            if removed:
+                await ctx.send(f"✅ Removed from whitelist: {', '.join(removed)}")
+            else:
+                await ctx.send("ℹ️ None of the specified users were on the whitelist.")
+
+    @_whitelist.command(name="list", aliases=["ls"])
+    async def _wl_list(self, ctx: commands.Context) -> None:
+        """Show the current whitelist and its status."""
+        enabled = await self.config.whitelist_enabled()
+        wl = await self.config.whitelisted_users()
+        status = "🟢 Enabled" if enabled else "🔴 Disabled"
+
+        if not wl:
+            await ctx.send(f"**Whitelist status:** {status}\n\nThe whitelist is empty.")
+            return
+
+        lines = []
+        for uid in wl:
+            user = self.bot.get_user(uid)
+            lines.append(f"• {user} (`{uid}`)" if user else f"• Unknown user (`{uid}`)")
+
+        header = f"**Whitelist status:** {status}\n**{len(wl)}** user(s):\n"
+        page = [header]
+        length = len(header)
+        for line in lines:
+            if length + len(line) + 1 > 1900:
+                await ctx.send("\n".join(page))
+                page = []
+                length = 0
+            page.append(line)
+            length += len(line) + 1
+        if page:
+            await ctx.send("\n".join(page))
+
+    @_whitelist.command(name="clear")
+    async def _wl_clear(self, ctx: commands.Context) -> None:
+        """Remove all users from the whitelist."""
+        await self.config.whitelisted_users.set([])
+        await ctx.send("✅ Whitelist has been cleared.")
 
 
 async def setup(bot: Red) -> None:
