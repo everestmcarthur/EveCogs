@@ -18,17 +18,13 @@ from ..models.permissions import (
     remove_staff,
 )
 from ..utils import ok_embed, err_embed, info_embed, COLOUR_INFO
+from ._base import WormholeBase
 
 
-class StaffCommands:
+class StaffCommands(WormholeBase):
     """Mixin — staff management (per-network hierarchy)."""
 
-    @commands.group(name="wh-staff", aliases=["whstaff"], invoke_without_command=True)
-    async def wh_staff(self, ctx: commands.Context) -> None:
-        """Manage network staff — add, remove, list, promote, demote."""
-        await ctx.send_help(ctx.command)
-
-    @wh_staff.command(name="add")
+    @WormholeBase.wh_staff.command(name="add")
     async def wh_staff_add(self, ctx: commands.Context, name: str, user: discord.User, role_str: str = "moderator") -> None:
         """Assign a staff role to a user.
 
@@ -57,7 +53,7 @@ class StaffCommands:
         ))
         await self._audit(name, "staff_add", str(ctx.author), str(user), f"role={role_name(target_role)}")
 
-    @wh_staff.command(name="remove", aliases=["rm"])
+    @WormholeBase.wh_staff.command(name="remove", aliases=["rm"])
     async def wh_staff_rm(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Remove a user from network staff."""
         nd = await self._net(name)
@@ -81,7 +77,7 @@ class StaffCommands:
         await ctx.send(embed=ok_embed(f"{user.mention} removed from staff in `{name}`."))
         await self._audit(name, "staff_rm", str(ctx.author), str(user))
 
-    @wh_staff.command(name="promote")
+    @WormholeBase.wh_staff.command(name="promote")
     async def wh_staff_promote(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Promote a staff member one tier up."""
         nd = await self._net(name)
@@ -110,7 +106,7 @@ class StaffCommands:
         ))
         await self._audit(name, "promote", str(ctx.author), str(user), f"{role_name(current)} → {role_name(new_role)}")
 
-    @wh_staff.command(name="demote")
+    @WormholeBase.wh_staff.command(name="demote")
     async def wh_staff_demote(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Demote a staff member one tier down."""
         nd = await self._net(name)
@@ -144,7 +140,7 @@ class StaffCommands:
         ))
         await self._audit(name, "demote", str(ctx.author), str(user), f"{role_name(current)} → {label}")
 
-    @wh_staff.command(name="list", aliases=["ls"])
+    @WormholeBase.wh_staff.command(name="list", aliases=["ls"])
     async def wh_staff_ls(self, ctx: commands.Context, name: str) -> None:
         """List all staff in a network with their roles."""
         nd = await self._net(name)
@@ -169,7 +165,7 @@ class StaffCommands:
         )
         await ctx.send(embed=em)
 
-    @commands.hybrid_command(name="wh-transfer")
+    @WormholeBase.wh.command(name="transfer")
     async def wh_transfer(self, ctx: commands.Context, name: str, new_owner: discord.User) -> None:
         """Transfer network ownership (owner or bot owner only)."""
         nd = await self._net(name)

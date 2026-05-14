@@ -15,19 +15,15 @@ from ..utils import (
     ok_embed, err_embed, info_embed, warn_embed, announce_embed,
     truncate, generate_invite_code, human_timedelta, COLOUR_INFO,
 )
+from ._base import WormholeBase
 
 
-class AdvancedCommands:
+class AdvancedCommands(WormholeBase):
     """Mixin — advanced features."""
 
     # ── Polls ──────────────────────────────────────────────────────────────
 
-    @commands.group(name="wh-poll", aliases=["whpoll"], invoke_without_command=True)
-    async def wh_poll(self, ctx: commands.Context) -> None:
-        """Network-wide polls."""
-        await ctx.send_help(ctx.command)
-
-    @wh_poll.command(name="create")
+    @WormholeBase.wh_poll.command(name="create")
     @requires_role(Role.MODERATOR)
     async def wh_poll_create(self, ctx: commands.Context, name: str, duration_minutes: int, question: str, *, options: str) -> None:
         """Create a poll. Options separated by ``|``.
@@ -66,7 +62,7 @@ class AdvancedCommands:
                     pass
         await ctx.send(embed=ok_embed(f"Poll `{poll_id}` created in `{name}`."))
 
-    @wh_poll.command(name="vote")
+    @WormholeBase.wh_poll.command(name="vote")
     async def wh_poll_vote(self, ctx: commands.Context, name: str, poll_id: str, choice: int) -> None:
         """Vote in a poll (choice = option number, 1-based)."""
         nd = await self._net(name)
@@ -88,7 +84,7 @@ class AdvancedCommands:
             p.setdefault("votes", {}).setdefault(idx, []).append(uid)
         await ctx.send(embed=ok_embed(f"Voted for **{poll['options'][choice-1]}**."), delete_after=5)
 
-    @wh_poll.command(name="results")
+    @WormholeBase.wh_poll.command(name="results")
     async def wh_poll_results(self, ctx: commands.Context, name: str, poll_id: str) -> None:
         """View current poll results."""
         nd = await self._net(name)
@@ -100,7 +96,7 @@ class AdvancedCommands:
         results = self._format_poll_results(poll)
         await ctx.send(embed=info_embed(results, title=f"📊 {poll['question']}"))
 
-    @wh_poll.command(name="end")
+    @WormholeBase.wh_poll.command(name="end")
     @requires_role(Role.MODERATOR)
     async def wh_poll_end(self, ctx: commands.Context, name: str, poll_id: str) -> None:
         """End a poll early."""
@@ -124,7 +120,7 @@ class AdvancedCommands:
 
     # ── AFK ────────────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="wh-afk")
+    @WormholeBase.wh.command(name="afk")
     async def wh_afk(self, ctx: commands.Context, name: str, *, reason: str = "AFK") -> None:
         """Set your AFK status in a network."""
         nd = await self._net(name)
@@ -139,12 +135,7 @@ class AdvancedCommands:
 
     # ── Auto-responses ─────────────────────────────────────────────────────
 
-    @commands.group(name="wh-ar", aliases=["whar"], invoke_without_command=True)
-    async def wh_ar(self, ctx: commands.Context) -> None:
-        """Auto-response triggers."""
-        await ctx.send_help(ctx.command)
-
-    @wh_ar.command(name="add")
+    @WormholeBase.wh_ar.command(name="add")
     @requires_role(Role.ADMIN)
     async def wh_ar_add(self, ctx: commands.Context, name: str, trigger: str, *, reply: str) -> None:
         """Add an auto-response.  Use ``regex:pattern`` for regex triggers."""
@@ -165,7 +156,7 @@ class AdvancedCommands:
             }
         await ctx.send(embed=ok_embed(f"Auto-response added for `{trigger}`."))
 
-    @wh_ar.command(name="remove", aliases=["rm"])
+    @WormholeBase.wh_ar.command(name="remove", aliases=["rm"])
     @requires_role(Role.ADMIN)
     async def wh_ar_rm(self, ctx: commands.Context, name: str, *, trigger: str) -> None:
         """Remove an auto-response."""
@@ -173,7 +164,7 @@ class AdvancedCommands:
             ns[name].get("auto_responses", {}).pop(trigger, None)
         await ctx.send(embed=ok_embed(f"Auto-response removed for `{trigger}`."))
 
-    @wh_ar.command(name="list")
+    @WormholeBase.wh_ar.command(name="list")
     @requires_role(Role.HELPER)
     async def wh_ar_list(self, ctx: commands.Context, name: str) -> None:
         """List auto-responses."""
@@ -191,12 +182,7 @@ class AdvancedCommands:
 
     # ── Scheduled messages ─────────────────────────────────────────────────
 
-    @commands.group(name="wh-schedule", aliases=["whschedule"], invoke_without_command=True)
-    async def wh_schedule(self, ctx: commands.Context) -> None:
-        """Scheduled messages."""
-        await ctx.send_help(ctx.command)
-
-    @wh_schedule.command(name="add")
+    @WormholeBase.wh_schedule.command(name="add")
     @requires_role(Role.ADMIN)
     async def wh_schedule_add(self, ctx: commands.Context, name: str, minutes_from_now: int, *, content: str) -> None:
         """Schedule a message to be sent in N minutes."""
@@ -209,7 +195,7 @@ class AdvancedCommands:
             })
         await ctx.send(embed=ok_embed(f"Message scheduled for {minutes_from_now} minutes from now."))
 
-    @wh_schedule.command(name="list")
+    @WormholeBase.wh_schedule.command(name="list")
     @requires_role(Role.HELPER)
     async def wh_schedule_list(self, ctx: commands.Context, name: str) -> None:
         """List scheduled messages."""
@@ -224,7 +210,7 @@ class AdvancedCommands:
             lines.append(f"**{i}.** {sm.get('send_at_iso', '?')[:16]} — {truncate(sm.get('content', ''), 60)}")
         await ctx.send(embed=info_embed("\n".join(lines), title=f"📅 Scheduled — {name}"))
 
-    @wh_schedule.command(name="clear")
+    @WormholeBase.wh_schedule.command(name="clear")
     @requires_role(Role.ADMIN)
     async def wh_schedule_clear(self, ctx: commands.Context, name: str) -> None:
         """Clear all scheduled messages."""
@@ -234,7 +220,7 @@ class AdvancedCommands:
 
     # ── Analytics ──────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="wh-analytics")
+    @WormholeBase.wh.command(name="analytics")
     @requires_role(Role.HELPER)
     async def wh_analytics(self, ctx: commands.Context, name: str) -> None:
         """View network analytics dashboard."""
@@ -269,7 +255,7 @@ class AdvancedCommands:
 
     # ── Quiet hours ────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="wh-quiet")
+    @WormholeBase.wh.command(name="quiet")
     async def wh_quiet(self, ctx: commands.Context, name: str, start_hour: int, end_hour: int, tz_offset: int = 0) -> None:
         """Set quiet hours — DM relay pauses during this window.
 
@@ -285,7 +271,7 @@ class AdvancedCommands:
             }
         await ctx.send(embed=ok_embed(f"Quiet hours set: {start_hour}:00–{end_hour}:00 (UTC{tz_offset:+d})"))
 
-    @commands.hybrid_command(name="wh-unquiet")
+    @WormholeBase.wh.command(name="unquiet")
     async def wh_unquiet(self, ctx: commands.Context, name: str) -> None:
         """Remove your quiet hours."""
         async with self.config.networks() as ns:
@@ -294,7 +280,7 @@ class AdvancedCommands:
 
     # ── User colours ───────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="wh-colour", aliases=["wh-color"])
+    @WormholeBase.wh.command(name="colour", aliases=["color"])
     async def wh_colour(self, ctx: commands.Context, name: str, hex_code: str = None) -> None:
         """Set your name colour in embed mode (hex, e.g. ``#ff5733``)."""
         if hex_code:
@@ -311,12 +297,7 @@ class AdvancedCommands:
 
     # ── Invites ────────────────────────────────────────────────────────────
 
-    @commands.group(name="wh-invite", aliases=["whinvite"], invoke_without_command=True)
-    async def wh_invite(self, ctx: commands.Context) -> None:
-        """Network invite codes."""
-        await ctx.send_help(ctx.command)
-
-    @wh_invite.command(name="create")
+    @WormholeBase.wh_invite.command(name="create")
     @requires_role(Role.ADMIN)
     async def wh_invite_create(self, ctx: commands.Context, name: str, max_uses: int = 0) -> None:
         """Create an invite code (``max_uses`` 0 = unlimited)."""
@@ -330,7 +311,7 @@ class AdvancedCommands:
             }
         await ctx.send(embed=ok_embed(f"Invite code: `{code}`\nMax uses: {'unlimited' if max_uses == 0 else max_uses}"))
 
-    @wh_invite.command(name="vanity")
+    @WormholeBase.wh_invite.command(name="vanity")
     @requires_role(Role.OWNER)
     async def wh_invite_vanity(self, ctx: commands.Context, name: str, code: str) -> None:
         """Set a vanity invite code."""
@@ -340,7 +321,7 @@ class AdvancedCommands:
             ns[name]["vanity_invite"] = code
         await ctx.send(embed=ok_embed(f"Vanity invite set: `{code}`"))
 
-    @wh_invite.command(name="list")
+    @WormholeBase.wh_invite.command(name="list")
     @requires_role(Role.ADMIN)
     async def wh_invite_list(self, ctx: commands.Context, name: str) -> None:
         """List all invite codes."""
@@ -360,7 +341,7 @@ class AdvancedCommands:
             lines.append(f"\n✨ Vanity: `{vanity}`")
         await ctx.send(embed=info_embed("\n".join(lines), title=f"🔗 Invites — {name}"))
 
-    @wh_invite.command(name="revoke")
+    @WormholeBase.wh_invite.command(name="revoke")
     @requires_role(Role.ADMIN)
     async def wh_invite_revoke(self, ctx: commands.Context, name: str, code: str) -> None:
         """Revoke an invite code."""
@@ -370,7 +351,7 @@ class AdvancedCommands:
 
     # ── Announcements ──────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="wh-announce")
+    @WormholeBase.wh.command(name="announce")
     @requires_role(Role.ADMIN)
     async def wh_announce(self, ctx: commands.Context, name: str, *, message: str) -> None:
         """Broadcast an announcement to all channels in the network."""
@@ -392,12 +373,7 @@ class AdvancedCommands:
 
     # ── Blackout schedules ─────────────────────────────────────────────────
 
-    @commands.group(name="wh-blackout", aliases=["whblackout"], invoke_without_command=True)
-    async def wh_blackout(self, ctx: commands.Context) -> None:
-        """Scheduled freeze windows."""
-        await ctx.send_help(ctx.command)
-
-    @wh_blackout.command(name="add")
+    @WormholeBase.wh_blackout.command(name="add")
     @requires_role(Role.ADMIN)
     async def wh_blackout_add(self, ctx: commands.Context, name: str, start_hour: int, end_hour: int, *, days: str = "0,1,2,3,4,5,6") -> None:
         """Add a blackout schedule. Days: 0=Mon … 6=Sun."""
@@ -410,7 +386,7 @@ class AdvancedCommands:
             })
         await ctx.send(embed=ok_embed(f"Blackout added: {start_hour}:00–{end_hour}:00 UTC on days {day_list}"))
 
-    @wh_blackout.command(name="clear")
+    @WormholeBase.wh_blackout.command(name="clear")
     @requires_role(Role.ADMIN)
     async def wh_blackout_clear(self, ctx: commands.Context, name: str) -> None:
         """Clear all blackout schedules."""
@@ -420,7 +396,7 @@ class AdvancedCommands:
 
     # ── Portal embed ───────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="wh-portal")
+    @WormholeBase.wh.command(name="portal")
     @requires_role(Role.ADMIN)
     async def wh_portal(self, ctx: commands.Context, name: str) -> None:
         """Post a self-updating portal embed in this channel."""

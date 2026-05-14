@@ -9,17 +9,13 @@ from redbot.core import commands
 
 from ..models.permissions import Role, requires_role
 from ..utils import ok_embed, err_embed, info_embed, COLOUR_INFO
+from ._base import WormholeBase
 
 
-class ToSCommands:
+class ToSCommands(WormholeBase):
     """Mixin — Terms of Service / rules acceptance gate."""
 
-    @commands.group(name="wh-rules", aliases=["whrules"], invoke_without_command=True)
-    async def wh_rules(self, ctx: commands.Context) -> None:
-        """Network rules / Terms of Service."""
-        await ctx.send_help(ctx.command)
-
-    @wh_rules.command(name="set")
+    @WormholeBase.wh_rules.command(name="set")
     @requires_role(Role.ADMIN)
     async def wh_rules_set(self, ctx: commands.Context, name: str, *, text: str) -> None:
         """Set the rules / ToS text."""
@@ -27,7 +23,7 @@ class ToSCommands:
             ns[name]["rules_text"] = text
         await ctx.send(embed=ok_embed(f"Rules updated for `{name}`."))
 
-    @wh_rules.command(name="require")
+    @WormholeBase.wh_rules.command(name="require")
     @requires_role(Role.ADMIN)
     async def wh_rules_require(self, ctx: commands.Context, name: str, enabled: bool = True) -> None:
         """Toggle mandatory rules acceptance before using the network."""
@@ -37,7 +33,7 @@ class ToSCommands:
             f"Rules acceptance {'required' if enabled else 'not required'} for `{name}`."
         ))
 
-    @wh_rules.command(name="view")
+    @WormholeBase.wh_rules.command(name="view")
     async def wh_rules_view(self, ctx: commands.Context, name: str) -> None:
         """View the network rules."""
         nd = await self._net(name)
@@ -56,7 +52,7 @@ class ToSCommands:
             em.set_footer(text="⚠️ You haven't accepted these rules yet. Use `wh accept` or `wh agree`.")
         await ctx.send(embed=em)
 
-    @commands.hybrid_command(name="wh-accept")
+    @WormholeBase.wh.command(name="accept")
     async def wh_accept(self, ctx: commands.Context, name: str) -> None:
         """Accept the network rules / ToS."""
         nd = await self._net(name)
@@ -68,12 +64,12 @@ class ToSCommands:
             ns[name].setdefault("rules_accepted", {})[str(ctx.author.id)] = datetime.now(timezone.utc).isoformat()
         await ctx.send(embed=ok_embed(f"You've accepted the rules for `{name}`. You can now use the relay."))
 
-    @commands.hybrid_command(name="wh-agree")
+    @WormholeBase.wh.command(name="agree")
     async def wh_agree(self, ctx: commands.Context, name: str) -> None:
         """Alias for ``wh accept``."""
         await self.wh_accept(ctx, name)
 
-    @wh_rules.command(name="reset")
+    @WormholeBase.wh_rules.command(name="reset")
     @requires_role(Role.ADMIN)
     async def wh_rules_reset(self, ctx: commands.Context, name: str) -> None:
         """Reset all acceptances (force everyone to re-accept)."""

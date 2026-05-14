@@ -7,17 +7,13 @@ from redbot.core import commands
 
 from ..models.permissions import Role, requires_role
 from ..utils import ok_embed, err_embed, info_embed, dm_embed, truncate
+from ._base import WormholeBase
 
 
-class DMCommands:
+class DMCommands(WormholeBase):
     """Mixin — DM relay management."""
 
-    @commands.group(name="wh-dm", aliases=["whdm"], invoke_without_command=True)
-    async def wh_dm(self, ctx: commands.Context) -> None:
-        """DM relay — receive network messages in your DMs."""
-        await ctx.send_help(ctx.command)
-
-    @wh_dm.command(name="enable")
+    @WormholeBase.wh_dm.command(name="enable")
     @requires_role(Role.ADMIN)
     async def wh_dm_enable(self, ctx: commands.Context, name: str, enabled: bool = True) -> None:
         """Enable or disable DM relay for a network."""
@@ -25,7 +21,7 @@ class DMCommands:
             ns[name]["dm_enabled"] = enabled
         await ctx.send(embed=ok_embed(f"DM relay {'enabled' if enabled else 'disabled'} for `{name}`."))
 
-    @wh_dm.command(name="subscribe", aliases=["sub"])
+    @WormholeBase.wh_dm.command(name="subscribe", aliases=["sub"])
     async def wh_dm_sub(self, ctx: commands.Context, name: str) -> None:
         """Subscribe to receive network messages via DM."""
         nd = await self._net(name)
@@ -40,7 +36,7 @@ class DMCommands:
             subs.append(ctx.author.id)
         await ctx.send(embed=ok_embed(f"Subscribed to DM relay for `{name}`."))
 
-    @wh_dm.command(name="unsubscribe", aliases=["unsub"])
+    @WormholeBase.wh_dm.command(name="unsubscribe", aliases=["unsub"])
     async def wh_dm_unsub(self, ctx: commands.Context, name: str) -> None:
         """Unsubscribe from DM relay."""
         async with self.config.networks() as ns:
@@ -49,7 +45,7 @@ class DMCommands:
                 subs.remove(ctx.author.id)
         await ctx.send(embed=ok_embed(f"Unsubscribed from DM relay for `{name}`."))
 
-    @wh_dm.command(name="mode")
+    @WormholeBase.wh_dm.command(name="mode")
     @requires_role(Role.ADMIN)
     async def wh_dm_mode(self, ctx: commands.Context, name: str, mode: str) -> None:
         """Set DM relay mode: ``embed``, ``compact``, or ``plain``."""
@@ -59,7 +55,7 @@ class DMCommands:
             ns[name]["dm_relay_mode"] = mode
         await ctx.send(embed=ok_embed(f"DM relay mode set to **{mode}** for `{name}`."))
 
-    @wh_dm.command(name="send")
+    @WormholeBase.wh_dm.command(name="send")
     async def wh_dm_send(self, ctx: commands.Context, name: str, *, message: str) -> None:
         """Send a message to the network from your DMs."""
         nd = await self._net(name)
@@ -83,7 +79,7 @@ class DMCommands:
                     pass
         await ctx.send(embed=ok_embed("Message sent to the network."))
 
-    @wh_dm.command(name="ignore")
+    @WormholeBase.wh_dm.command(name="ignore")
     async def wh_dm_ignore(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Ignore a user in DM relay (you won't see their messages)."""
         async with self.config.networks() as ns:
@@ -94,7 +90,7 @@ class DMCommands:
                 user_ignores.append(user.id)
         await ctx.send(embed=ok_embed(f"{user.display_name} ignored in DM relay for `{name}`."))
 
-    @wh_dm.command(name="unignore")
+    @WormholeBase.wh_dm.command(name="unignore")
     async def wh_dm_unignore(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Stop ignoring a user in DM relay."""
         async with self.config.networks() as ns:

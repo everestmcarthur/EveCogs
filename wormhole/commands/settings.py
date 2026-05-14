@@ -9,19 +9,15 @@ from redbot.core import commands
 
 from ..models.permissions import Role, requires_role
 from ..utils import ok_embed, err_embed, info_embed, COLOUR_INFO, COLOUR_OK
+from ._base import WormholeBase
 
 
-class SettingsCommands:
+class SettingsCommands(WormholeBase):
     """Mixin — network settings management."""
-
-    @commands.group(name="wh-set", aliases=["whset"], invoke_without_command=True)
-    async def wh_set(self, ctx: commands.Context) -> None:
-        """Configure network settings."""
-        await ctx.send_help(ctx.command)
 
     # ── Relay mode ─────────────────────────────────────────────────────────
 
-    @wh_set.command(name="relaymode")
+    @WormholeBase.wh_set.command(name="relaymode")
     @requires_role(Role.ADMIN)
     async def wh_set_relaymode(self, ctx: commands.Context, name: str, mode: str) -> None:
         """Set relay mode: ``webhook``, ``embed``, or ``compact``."""
@@ -34,7 +30,7 @@ class SettingsCommands:
 
     # ── Webhooks ───────────────────────────────────────────────────────────
 
-    @wh_set.command(name="webhooks")
+    @WormholeBase.wh_set.command(name="webhooks")
     @requires_role(Role.ADMIN)
     async def wh_set_webhooks(self, ctx: commands.Context, name: str, enabled: bool) -> None:
         """Enable or disable webhook relay."""
@@ -45,7 +41,7 @@ class SettingsCommands:
 
     # ── Sync toggles ──────────────────────────────────────────────────────
 
-    @wh_set.command(name="sync")
+    @WormholeBase.wh_set.command(name="sync")
     @requires_role(Role.ADMIN)
     async def wh_set_sync(self, ctx: commands.Context, name: str, feature: str, enabled: bool) -> None:
         """Toggle sync features: ``edits``, ``deletes``, ``reactions``, ``replies``, ``stickers``, ``pins``, ``threads``, ``typing``."""
@@ -64,7 +60,7 @@ class SettingsCommands:
 
     # ── Identity ───────────────────────────────────────────────────────────
 
-    @wh_set.command(name="imagemode")
+    @WormholeBase.wh_set.command(name="imagemode")
     @requires_role(Role.ADMIN)
     async def wh_set_imagemode(self, ctx: commands.Context, name: str, mode: str) -> None:
         """Set avatar mode: ``user``, ``server``, ``custom``."""
@@ -74,7 +70,7 @@ class SettingsCommands:
             ns[name]["image_mode"] = mode
         await ctx.send(embed=ok_embed(f"Image mode for `{name}` set to **{mode}**."))
 
-    @wh_set.command(name="namemode")
+    @WormholeBase.wh_set.command(name="namemode")
     @requires_role(Role.ADMIN)
     async def wh_set_namemode(self, ctx: commands.Context, name: str, mode: str) -> None:
         """Set name mode: ``user``, ``server``, ``both``, ``custom``."""
@@ -84,7 +80,7 @@ class SettingsCommands:
             ns[name]["name_mode"] = mode
         await ctx.send(embed=ok_embed(f"Name mode for `{name}` set to **{mode}**."))
 
-    @wh_set.command(name="icon")
+    @WormholeBase.wh_set.command(name="icon")
     @requires_role(Role.ADMIN)
     async def wh_set_icon(self, ctx: commands.Context, name: str, url: str = None) -> None:
         """Set a custom network icon URL."""
@@ -92,7 +88,7 @@ class SettingsCommands:
             ns[name]["custom_icon"] = url
         await ctx.send(embed=ok_embed(f"Custom icon {'set' if url else 'cleared'} for `{name}`."))
 
-    @wh_set.command(name="customname")
+    @WormholeBase.wh_set.command(name="customname")
     @requires_role(Role.ADMIN)
     async def wh_set_customname(self, ctx: commands.Context, name: str, *, value: str = None) -> None:
         """Set a custom display name for relayed messages."""
@@ -100,7 +96,7 @@ class SettingsCommands:
             ns[name]["custom_name"] = value
         await ctx.send(embed=ok_embed(f"Custom name {'set' if value else 'cleared'} for `{name}`."))
 
-    @wh_set.command(name="colour", aliases=["color"])
+    @WormholeBase.wh_set.command(name="colour", aliases=["color"])
     @requires_role(Role.ADMIN)
     async def wh_set_colour(self, ctx: commands.Context, name: str, hex_code: str = None) -> None:
         """Set the network embed colour (hex, e.g. ``#ff5733``)."""
@@ -117,7 +113,7 @@ class SettingsCommands:
 
     # ── Description / MOTD / rules ─────────────────────────────────────────
 
-    @wh_set.command(name="description", aliases=["desc"])
+    @WormholeBase.wh_set.command(name="description", aliases=["desc"])
     @requires_role(Role.ADMIN)
     async def wh_set_desc(self, ctx: commands.Context, name: str, *, text: str) -> None:
         """Set the network description."""
@@ -125,7 +121,7 @@ class SettingsCommands:
             ns[name]["description"] = text
         await ctx.send(embed=ok_embed(f"Description updated for `{name}`."))
 
-    @wh_set.command(name="motd")
+    @WormholeBase.wh_set.command(name="motd")
     @requires_role(Role.ADMIN)
     async def wh_set_motd(self, ctx: commands.Context, name: str, *, text: str = "") -> None:
         """Set or clear the Message of the Day."""
@@ -133,7 +129,7 @@ class SettingsCommands:
             ns[name]["motd"] = text
         await ctx.send(embed=ok_embed(f"MOTD {'set' if text else 'cleared'} for `{name}`."))
 
-    @wh_set.command(name="welcome")
+    @WormholeBase.wh_set.command(name="welcome")
     @requires_role(Role.ADMIN)
     async def wh_set_welcome(self, ctx: commands.Context, name: str, *, text: str = "") -> None:
         """Set or clear the welcome message for new servers."""
@@ -143,7 +139,7 @@ class SettingsCommands:
 
     # ── Network behaviour ──────────────────────────────────────────────────
 
-    @wh_set.command(name="freeze")
+    @WormholeBase.wh_set.command(name="freeze")
     @requires_role(Role.ADMIN)
     async def wh_set_freeze(self, ctx: commands.Context, name: str) -> None:
         """Freeze the network — relay paused."""
@@ -152,7 +148,7 @@ class SettingsCommands:
         await ctx.send(embed=ok_embed(f"`{name}` is now ❄️ frozen. Messages won't relay."))
         await self._audit(name, "freeze", str(ctx.author))
 
-    @wh_set.command(name="unfreeze")
+    @WormholeBase.wh_set.command(name="unfreeze")
     @requires_role(Role.ADMIN)
     async def wh_set_unfreeze(self, ctx: commands.Context, name: str) -> None:
         """Unfreeze the network — resume relay."""
@@ -161,7 +157,7 @@ class SettingsCommands:
         await ctx.send(embed=ok_embed(f"`{name}` is now 🟢 active."))
         await self._audit(name, "unfreeze", str(ctx.author))
 
-    @wh_set.command(name="anonymous", aliases=["anon"])
+    @WormholeBase.wh_set.command(name="anonymous", aliases=["anon"])
     @requires_role(Role.ADMIN)
     async def wh_set_anonymous(self, ctx: commands.Context, name: str, enabled: bool) -> None:
         """Toggle anonymous mode."""
@@ -172,7 +168,7 @@ class SettingsCommands:
                 ns[name]["anon_salt"] = secrets.token_hex(8)
         await ctx.send(embed=ok_embed(f"Anonymous mode {'enabled' if enabled else 'disabled'} for `{name}`."))
 
-    @wh_set.command(name="nsfw")
+    @WormholeBase.wh_set.command(name="nsfw")
     @requires_role(Role.ADMIN)
     async def wh_set_nsfw(self, ctx: commands.Context, name: str, gate: bool) -> None:
         """Toggle NSFW gate (only relay to NSFW channels if source is NSFW)."""
@@ -180,7 +176,7 @@ class SettingsCommands:
             ns[name]["nsfw_gate"] = gate
         await ctx.send(embed=ok_embed(f"NSFW gate {'enabled' if gate else 'disabled'} for `{name}`."))
 
-    @wh_set.command(name="mediaonly")
+    @WormholeBase.wh_set.command(name="mediaonly")
     @requires_role(Role.ADMIN)
     async def wh_set_mediaonly(self, ctx: commands.Context, name: str, enabled: bool) -> None:
         """Toggle media-only mode (only relay messages with attachments)."""
@@ -188,7 +184,7 @@ class SettingsCommands:
             ns[name]["media_only"] = enabled
         await ctx.send(embed=ok_embed(f"Media-only mode {'enabled' if enabled else 'disabled'} for `{name}`."))
 
-    @wh_set.command(name="silent")
+    @WormholeBase.wh_set.command(name="silent")
     @requires_role(Role.ADMIN)
     async def wh_set_silent(self, ctx: commands.Context, name: str, enabled: bool) -> None:
         """Toggle silent mode (suppress status messages)."""
@@ -196,7 +192,7 @@ class SettingsCommands:
             ns[name]["silent"] = enabled
         await ctx.send(embed=ok_embed(f"Silent mode {'enabled' if enabled else 'disabled'} for `{name}`."))
 
-    @wh_set.command(name="embeds")
+    @WormholeBase.wh_set.command(name="embeds")
     @requires_role(Role.ADMIN)
     async def wh_set_embeds(self, ctx: commands.Context, name: str, enabled: bool) -> None:
         """Toggle forwarding embeds from relayed messages."""
@@ -206,7 +202,7 @@ class SettingsCommands:
 
     # ── Rate limiting ──────────────────────────────────────────────────────
 
-    @wh_set.command(name="ratelimit")
+    @WormholeBase.wh_set.command(name="ratelimit")
     @requires_role(Role.ADMIN)
     async def wh_set_ratelimit(self, ctx: commands.Context, name: str, rate: int = 5, per: float = 10.0) -> None:
         """Set rate limit: *rate* messages per *per* seconds."""
@@ -220,7 +216,7 @@ class SettingsCommands:
             self.cooldowns[name] = CooldownBucket(rate, per)
         await ctx.send(embed=ok_embed(f"Rate limit: {rate} msgs per {per}s for `{name}`."))
 
-    @wh_set.command(name="slowmode")
+    @WormholeBase.wh_set.command(name="slowmode")
     @requires_role(Role.ADMIN)
     async def wh_set_slowmode(self, ctx: commands.Context, name: str, seconds: int = 0) -> None:
         """Set slowmode (seconds between messages per user, 0 to disable)."""
@@ -230,7 +226,7 @@ class SettingsCommands:
 
     # ── Log channel ────────────────────────────────────────────────────────
 
-    @wh_set.command(name="logchannel", aliases=["log"])
+    @WormholeBase.wh_set.command(name="logchannel", aliases=["log"])
     @requires_role(Role.ADMIN)
     async def wh_set_logchannel(self, ctx: commands.Context, name: str, channel: discord.TextChannel = None) -> None:
         """Set (or clear) the mod log channel."""
@@ -240,7 +236,7 @@ class SettingsCommands:
 
     # ── Server nicknames ───────────────────────────────────────────────────
 
-    @wh_set.command(name="servernick")
+    @WormholeBase.wh_set.command(name="servernick")
     @requires_role(Role.ADMIN)
     async def wh_set_servernick(self, ctx: commands.Context, name: str, guild_id: int, *, nick: str = None) -> None:
         """Set or clear a nickname for a server in relay messages."""
@@ -254,7 +250,7 @@ class SettingsCommands:
 
     # ── Relay delay ────────────────────────────────────────────────────────
 
-    @wh_set.command(name="delay")
+    @WormholeBase.wh_set.command(name="delay")
     @requires_role(Role.ADMIN)
     async def wh_set_delay(self, ctx: commands.Context, name: str, seconds: int = 0) -> None:
         """Set relay delay (seconds before messages are relayed, 0 to disable)."""
@@ -264,7 +260,7 @@ class SettingsCommands:
 
     # ── Ephemeral auto-delete ──────────────────────────────────────────────
 
-    @wh_set.command(name="ephemeral")
+    @WormholeBase.wh_set.command(name="ephemeral")
     @requires_role(Role.ADMIN)
     async def wh_set_ephemeral(self, ctx: commands.Context, name: str, seconds: int = 0) -> None:
         """Auto-delete relayed messages after N seconds (0 to disable)."""
@@ -274,7 +270,7 @@ class SettingsCommands:
 
     # ── Discovery ──────────────────────────────────────────────────────────
 
-    @wh_set.command(name="public")
+    @WormholeBase.wh_set.command(name="public")
     @requires_role(Role.OWNER)
     async def wh_set_public(self, ctx: commands.Context, name: str, enabled: bool) -> None:
         """Make network publicly discoverable."""
@@ -282,7 +278,7 @@ class SettingsCommands:
             ns[name]["public"] = enabled
         await ctx.send(embed=ok_embed(f"`{name}` is now {'public' if enabled else 'private'}."))
 
-    @wh_set.command(name="tags")
+    @WormholeBase.wh_set.command(name="tags")
     @requires_role(Role.ADMIN)
     async def wh_set_tags(self, ctx: commands.Context, name: str, *, tags: str) -> None:
         """Set discovery tags (comma-separated)."""
@@ -293,7 +289,7 @@ class SettingsCommands:
 
     # ── Channel overrides ──────────────────────────────────────────────────
 
-    @wh_set.command(name="override")
+    @WormholeBase.wh_set.command(name="override")
     @requires_role(Role.ADMIN)
     async def wh_set_override(self, ctx: commands.Context, name: str, key: str, value: str) -> None:
         """Set a per-channel config override for the current channel."""
@@ -321,7 +317,7 @@ class SettingsCommands:
 
     # ── View all settings ──────────────────────────────────────────────────
 
-    @wh_set.command(name="show")
+    @WormholeBase.wh_set.command(name="show")
     @requires_role(Role.HELPER)
     async def wh_set_show(self, ctx: commands.Context, name: str) -> None:
         """Show current settings for a network."""

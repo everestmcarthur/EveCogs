@@ -7,17 +7,13 @@ from redbot.core import commands
 
 from ..models.permissions import Role, requires_role
 from ..utils import ok_embed, err_embed, info_embed, COLOUR_INFO
+from ._base import WormholeBase
 
 
-class MentionCommands:
+class MentionCommands(WormholeBase):
     """Mixin — mention policy management."""
 
-    @commands.group(name="wh-mention", aliases=["whmention"], invoke_without_command=True)
-    async def wh_mention(self, ctx: commands.Context) -> None:
-        """Configure mention behaviour."""
-        await ctx.send_help(ctx.command)
-
-    @wh_mention.command(name="set")
+    @WormholeBase.wh_mention.command(name="set")
     @requires_role(Role.ADMIN)
     async def wh_mention_set(self, ctx: commands.Context, name: str, kind: str, allowed: bool) -> None:
         """Set a mention policy.
@@ -38,7 +34,7 @@ class MentionCommands:
         await ctx.send(embed=ok_embed(f"`{kind}` mentions {'allowed' if allowed else 'blocked'} in `{name}`."))
         await self._audit(name, f"mention_{kind}", str(ctx.author), details=str(allowed))
 
-    @wh_mention.command(name="exempt")
+    @WormholeBase.wh_mention.command(name="exempt")
     @requires_role(Role.ADMIN)
     async def wh_mention_exempt(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Exempt a user from mention restrictions."""
@@ -48,7 +44,7 @@ class MentionCommands:
                 exempt.append(user.id)
         await ctx.send(embed=ok_embed(f"{user.mention} exempted from mention restrictions in `{name}`."))
 
-    @wh_mention.command(name="unexempt")
+    @WormholeBase.wh_mention.command(name="unexempt")
     @requires_role(Role.ADMIN)
     async def wh_mention_unexempt(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Remove a user's mention exemption."""
@@ -58,7 +54,7 @@ class MentionCommands:
                 exempt.remove(user.id)
         await ctx.send(embed=ok_embed(f"{user.mention} exemption removed in `{name}`."))
 
-    @wh_mention.command(name="optout")
+    @WormholeBase.wh_mention.command(name="optout")
     async def wh_mention_optout(self, ctx: commands.Context, name: str) -> None:
         """Opt out of being pinged via relay."""
         async with self.config.networks() as ns:
@@ -67,7 +63,7 @@ class MentionCommands:
                 optout.append(ctx.author.id)
         await ctx.send(embed=ok_embed("You've opted out of relay pings."))
 
-    @wh_mention.command(name="optin")
+    @WormholeBase.wh_mention.command(name="optin")
     async def wh_mention_optin(self, ctx: commands.Context, name: str) -> None:
         """Opt back in to relay pings."""
         async with self.config.networks() as ns:
@@ -76,7 +72,7 @@ class MentionCommands:
                 optout.remove(ctx.author.id)
         await ctx.send(embed=ok_embed("You've opted back in to relay pings."))
 
-    @wh_mention.command(name="serveroverride")
+    @WormholeBase.wh_mention.command(name="serveroverride")
     @requires_role(Role.ADMIN)
     async def wh_mention_serveroverride(self, ctx: commands.Context, name: str, guild_id: int, kind: str, allowed: bool) -> None:
         """Set per-server mention override."""
@@ -94,7 +90,7 @@ class MentionCommands:
             so.setdefault(gid_str, {})[key_map[kind]] = allowed
         await ctx.send(embed=ok_embed(f"Server override set for `{guild_id}` in `{name}`."))
 
-    @wh_mention.command(name="show")
+    @WormholeBase.wh_mention.command(name="show")
     @requires_role(Role.HELPER)
     async def wh_mention_show(self, ctx: commands.Context, name: str) -> None:
         """Show current mention policy."""

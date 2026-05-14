@@ -726,9 +726,4 @@ class Wormhole(
             )
         await interaction.response.send_message(embed=em, ephemeral=True)
 
-    # ── Root command group ─────────────────────────────────────────────────
-
-    @commands.hybrid_group(name="wh", aliases=["wormhole"], invoke_without_command=True)
-    async def wh(self, ctx: commands.Context) -> None:
-        """🌀 Wormhole — the ultimate cross-server relay."""
-        await ctx.send_help(ctx.command)
+    # ── Root command group is defined in commands/_base.py ────────────────

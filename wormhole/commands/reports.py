@@ -9,17 +9,13 @@ from redbot.core import commands
 
 from ..models.permissions import Role, requires_role, has_role
 from ..utils import ok_embed, err_embed, info_embed, warn_embed, truncate, COLOUR_INFO
+from ._base import WormholeBase
 
 
-class ReportCommands:
+class ReportCommands(WormholeBase):
     """Mixin — user report system (per-network)."""
 
-    @commands.group(name="wh-report", aliases=["whreport"], invoke_without_command=True)
-    async def wh_report(self, ctx: commands.Context) -> None:
-        """Network report system."""
-        await ctx.send_help(ctx.command)
-
-    @wh_report.command(name="msg")
+    @WormholeBase.wh_report.command(name="msg")
     async def wh_report_msg(self, ctx: commands.Context, message_id: int, *, reason: str = "No reason provided") -> None:
         """Report a message by ID."""
         net_name = await self._net_for_ch(ctx.channel.id)
@@ -51,7 +47,7 @@ class ReportCommands:
             title="New Report",
         ))
 
-    @wh_report.command(name="list")
+    @WormholeBase.wh_report.command(name="list")
     @requires_role(Role.HELPER)
     async def wh_report_list(self, ctx: commands.Context, name: str, show_resolved: bool = False) -> None:
         """List reports for a network."""
@@ -74,7 +70,7 @@ class ReportCommands:
         em = discord.Embed(title=f"🚩 Reports — {name}", description="\n".join(lines), colour=COLOUR_INFO)
         await ctx.send(embed=em)
 
-    @wh_report.command(name="view")
+    @WormholeBase.wh_report.command(name="view")
     @requires_role(Role.HELPER)
     async def wh_report_view(self, ctx: commands.Context, name: str, report_id: int) -> None:
         """View details of a specific report."""
@@ -103,7 +99,7 @@ class ReportCommands:
             em.add_field(name="Resolution", value=report["resolution"], inline=False)
         await ctx.send(embed=em)
 
-    @wh_report.command(name="resolve")
+    @WormholeBase.wh_report.command(name="resolve")
     @requires_role(Role.MODERATOR)
     async def wh_report_resolve(self, ctx: commands.Context, name: str, report_id: int, *, resolution: str = "Resolved") -> None:
         """Resolve a report."""
@@ -120,7 +116,7 @@ class ReportCommands:
         await ctx.send(embed=ok_embed(f"Report #{report_id} resolved."))
         await self._audit(name, "report_resolve", str(ctx.author), str(report_id), resolution)
 
-    @wh_report.command(name="dismiss")
+    @WormholeBase.wh_report.command(name="dismiss")
     @requires_role(Role.MODERATOR)
     async def wh_report_dismiss(self, ctx: commands.Context, name: str, report_id: int, *, reason: str = "Dismissed") -> None:
         """Dismiss a report."""

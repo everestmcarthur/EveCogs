@@ -12,17 +12,13 @@ from redbot.core import checks, commands
 
 from ..models.permissions import Role, has_role, requires_role
 from ..utils import ok_embed, err_embed, info_embed, warn_embed, COLOUR_INFO, human_timedelta
+from ._base import WormholeBase
 
 
-class DebugCommands:
+class DebugCommands(WormholeBase):
     """Mixin — debug, diagnostics, backup/restore."""
 
-    @commands.group(name="wh-debug", aliases=["whdebug"], invoke_without_command=True)
-    async def wh_debug(self, ctx: commands.Context) -> None:
-        """Debug and diagnostic tools."""
-        await ctx.send_help(ctx.command)
-
-    @wh_debug.command(name="health")
+    @WormholeBase.wh_debug.command(name="health")
     @requires_role(Role.HELPER)
     async def wh_debug_health(self, ctx: commands.Context, name: str) -> None:
         """Check network health — permissions, webhooks, channel status."""
@@ -62,7 +58,7 @@ class DebugCommands:
         em.set_footer(text=f"{healthy}/{len(channels)} healthy · Last check: {nd.get('last_health_check', 'never')[:16]}")
         await ctx.send(embed=em)
 
-    @wh_debug.command(name="trace")
+    @WormholeBase.wh_debug.command(name="trace")
     @requires_role(Role.ADMIN)
     async def wh_debug_trace(self, ctx: commands.Context) -> None:
         """Toggle trace mode for this channel — logs all relay decisions."""
@@ -73,7 +69,7 @@ class DebugCommands:
             self._trace_channels.add(ctx.channel.id)
             await ctx.send(embed=ok_embed("Trace mode **enabled** — relay decisions will be logged here."))
 
-    @wh_debug.command(name="testsend")
+    @WormholeBase.wh_debug.command(name="testsend")
     @requires_role(Role.ADMIN)
     async def wh_debug_testsend(self, ctx: commands.Context, name: str) -> None:
         """Send a test message through the relay."""
@@ -97,7 +93,7 @@ class DebugCommands:
                     await ctx.send(embed=warn_embed(f"Failed to send to {ch.mention}: {exc}"))
         await ctx.send(embed=ok_embed(f"Test message sent to {sent} channels."))
 
-    @wh_debug.command(name="relaydebug")
+    @WormholeBase.wh_debug.command(name="relaydebug")
     @requires_role(Role.ADMIN)
     async def wh_debug_relaydebug(self, ctx: commands.Context, name: str) -> None:
         """Show detailed relay pipeline state for diagnostics."""
@@ -120,7 +116,7 @@ class DebugCommands:
 
     # ── Backup / Restore ───────────────────────────────────────────────────
 
-    @wh_debug.command(name="backup")
+    @WormholeBase.wh_debug.command(name="backup")
     @requires_role(Role.OWNER)
     async def wh_debug_backup(self, ctx: commands.Context, name: str) -> None:
         """Export network config as a JSON file."""
@@ -139,7 +135,7 @@ class DebugCommands:
             file=discord.File(buf, filename=f"wormhole_{name}_backup.json"),
         )
 
-    @wh_debug.command(name="restore")
+    @WormholeBase.wh_debug.command(name="restore")
     @checks.is_owner()
     async def wh_debug_restore(self, ctx: commands.Context, name: str) -> None:
         """Restore a network from a JSON backup (attach file to message)."""
@@ -159,7 +155,7 @@ class DebugCommands:
 
     # ── Version ────────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="wh-version")
+    @WormholeBase.wh.command(name="version")
     async def wh_version(self, ctx: commands.Context) -> None:
         """Show Wormhole cog version."""
         nets = await self.config.networks()

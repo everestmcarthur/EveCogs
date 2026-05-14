@@ -12,12 +12,13 @@ from redbot.core import commands
 from ..models.config import DEFAULT_NETWORK
 from ..models.permissions import Role, has_role, requires_role, role_name, get_role, list_staff
 from ..utils import ok_embed, err_embed, info_embed, warn_embed, COLOUR_INFO, COLOUR_OK, truncate
+from ._base import WormholeBase
 
 
-class NetworkCommands:
+class NetworkCommands(WormholeBase):
     """Mixin — network lifecycle commands."""
 
-    @commands.hybrid_command(name="wh-create")
+    @WormholeBase.wh.command(name="create")
     async def wh_create(self, ctx: commands.Context, name: str, *, description: str = "") -> None:
         """Create a new wormhole network."""
         nets = await self.config.networks()
@@ -40,7 +41,7 @@ class NetworkCommands:
         ))
         await self._audit(name, "create", str(ctx.author))
 
-    @commands.hybrid_command(name="wh-delete")
+    @WormholeBase.wh.command(name="delete")
     async def wh_delete(self, ctx: commands.Context, name: str) -> None:
         """Delete a network (owner or bot owner only)."""
         nd = await self._net(name)
@@ -54,7 +55,7 @@ class NetworkCommands:
         self.cooldowns.pop(name, None)
         await ctx.send(embed=ok_embed(f"Network `{name}` deleted."))
 
-    @commands.hybrid_command(name="wh-open")
+    @WormholeBase.wh.command(name="open")
     @requires_role(Role.ADMIN)
     async def wh_open(self, ctx: commands.Context, name: str) -> None:
         """Add the current channel to a network."""
@@ -63,7 +64,6 @@ class NetworkCommands:
             return await ctx.send(embed=err_embed(f"Network `{name}` not found."))
         if ctx.channel.id in nd.get("channels", []):
             return await ctx.send(embed=err_embed("This channel is already in the network."))
-        # Check not in another network
         existing = await self._net_for_ch(ctx.channel.id)
         if existing:
             return await ctx.send(embed=err_embed(f"This channel is already in network `{existing}`."))
@@ -72,7 +72,7 @@ class NetworkCommands:
         await ctx.send(embed=ok_embed(f"Channel linked to `{name}`. Messages will now relay."))
         await self._audit(name, "open", str(ctx.author), str(ctx.channel.id))
 
-    @commands.hybrid_command(name="wh-close")
+    @WormholeBase.wh.command(name="close")
     async def wh_close(self, ctx: commands.Context, name: str = None) -> None:
         """Remove the current channel from a network."""
         if not name:
@@ -91,7 +91,7 @@ class NetworkCommands:
         await ctx.send(embed=ok_embed(f"Channel removed from `{name}`."))
         await self._audit(name, "close", str(ctx.author), str(ctx.channel.id))
 
-    @commands.hybrid_command(name="wh-list")
+    @WormholeBase.wh.command(name="list")
     async def wh_list(self, ctx: commands.Context) -> None:
         """List all networks you have access to."""
         nets = await self.config.networks()
@@ -107,7 +107,7 @@ class NetworkCommands:
         em = discord.Embed(title="🌀 Wormhole Networks", description="\n".join(lines), colour=COLOUR_INFO)
         await ctx.send(embed=em)
 
-    @commands.hybrid_command(name="wh-discover")
+    @WormholeBase.wh.command(name="discover")
     async def wh_discover(self, ctx: commands.Context) -> None:
         """Browse public networks."""
         nets = await self.config.networks()
@@ -122,7 +122,7 @@ class NetworkCommands:
         em = discord.Embed(title="🔍 Public Networks", description="\n".join(lines), colour=COLOUR_INFO)
         await ctx.send(embed=em)
 
-    @commands.hybrid_command(name="wh-info")
+    @WormholeBase.wh.command(name="info")
     async def wh_info(self, ctx: commands.Context, name: str) -> None:
         """Show detailed info about a network."""
         nd = await self._net(name)
@@ -137,7 +137,6 @@ class NetworkCommands:
         em.add_field(name="Status", value=status, inline=True)
         em.add_field(name="Owner", value=str(owner or nd["owner_id"]), inline=True)
 
-        # Staff count by role
         staff = list_staff(nd)
         staff_summary = []
         for role in (Role.ADMIN, Role.MODERATOR, Role.HELPER):

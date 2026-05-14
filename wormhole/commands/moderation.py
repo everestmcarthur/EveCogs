@@ -10,19 +10,15 @@ from redbot.core import commands
 
 from ..models.permissions import Role, has_role, requires_role, role_name, get_role
 from ..utils import ok_embed, err_embed, info_embed, warn_embed, truncate, COLOUR_INFO
+from ._base import WormholeBase
 
 
-class ModerationCommands:
+class ModerationCommands(WormholeBase):
     """Mixin — moderation tools (per-network, role-gated)."""
-
-    @commands.group(name="wh-mod", aliases=["whmod"], invoke_without_command=True)
-    async def wh_mod(self, ctx: commands.Context) -> None:
-        """Network moderation tools."""
-        await ctx.send_help(ctx.command)
 
     # ── User bans ──────────────────────────────────────────────────────────
 
-    @wh_mod.command(name="ban")
+    @WormholeBase.wh_mod.command(name="ban")
     @requires_role(Role.MODERATOR)
     async def wh_mod_ban(self, ctx: commands.Context, name: str, user: discord.User, *, reason: str = "No reason") -> None:
         """Ban a user from the network."""
@@ -41,7 +37,7 @@ class ModerationCommands:
         await self._audit(name, "ban", str(ctx.author), str(user), reason)
         await self._log(nd, warn_embed(f"🔨 **{user}** banned by {ctx.author}\nReason: {reason}"))
 
-    @wh_mod.command(name="unban")
+    @WormholeBase.wh_mod.command(name="unban")
     @requires_role(Role.MODERATOR)
     async def wh_mod_unban(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Unban a user from the network."""
@@ -54,7 +50,7 @@ class ModerationCommands:
 
     # ── User mutes ─────────────────────────────────────────────────────────
 
-    @wh_mod.command(name="mute")
+    @WormholeBase.wh_mod.command(name="mute")
     @requires_role(Role.MODERATOR)
     async def wh_mod_mute(self, ctx: commands.Context, name: str, user: discord.User, *, reason: str = "No reason") -> None:
         """Mute a user in the network (messages won't relay)."""
@@ -71,7 +67,7 @@ class ModerationCommands:
         await self._audit(name, "mute", str(ctx.author), str(user), reason)
         await self._log(nd, warn_embed(f"🔇 **{user}** muted by {ctx.author}\nReason: {reason}"))
 
-    @wh_mod.command(name="unmute")
+    @WormholeBase.wh_mod.command(name="unmute")
     @requires_role(Role.MODERATOR)
     async def wh_mod_unmute(self, ctx: commands.Context, name: str, user: discord.User) -> None:
         """Unmute a user in the network."""
@@ -84,7 +80,7 @@ class ModerationCommands:
 
     # ── Server bans/mutes ──────────────────────────────────────────────────
 
-    @wh_mod.command(name="banserver")
+    @WormholeBase.wh_mod.command(name="banserver")
     @requires_role(Role.ADMIN)
     async def wh_mod_banserver(self, ctx: commands.Context, name: str, guild_id: int) -> None:
         """Ban a server from the network."""
@@ -95,7 +91,7 @@ class ModerationCommands:
         await ctx.send(embed=ok_embed(f"Server `{guild_id}` banned from `{name}`."))
         await self._audit(name, "banserver", str(ctx.author), str(guild_id))
 
-    @wh_mod.command(name="unbanserver")
+    @WormholeBase.wh_mod.command(name="unbanserver")
     @requires_role(Role.ADMIN)
     async def wh_mod_unbanserver(self, ctx: commands.Context, name: str, guild_id: int) -> None:
         """Unban a server from the network."""
@@ -106,7 +102,7 @@ class ModerationCommands:
         await ctx.send(embed=ok_embed(f"Server `{guild_id}` unbanned from `{name}`."))
         await self._audit(name, "unbanserver", str(ctx.author), str(guild_id))
 
-    @wh_mod.command(name="muteserver")
+    @WormholeBase.wh_mod.command(name="muteserver")
     @requires_role(Role.ADMIN)
     async def wh_mod_muteserver(self, ctx: commands.Context, name: str, guild_id: int) -> None:
         """Mute a server in the network."""
@@ -117,7 +113,7 @@ class ModerationCommands:
         await ctx.send(embed=ok_embed(f"Server `{guild_id}` muted in `{name}`."))
         await self._audit(name, "muteserver", str(ctx.author), str(guild_id))
 
-    @wh_mod.command(name="unmuteserver")
+    @WormholeBase.wh_mod.command(name="unmuteserver")
     @requires_role(Role.ADMIN)
     async def wh_mod_unmuteserver(self, ctx: commands.Context, name: str, guild_id: int) -> None:
         """Unmute a server in the network."""
@@ -130,7 +126,7 @@ class ModerationCommands:
 
     # ── Allowlist ──────────────────────────────────────────────────────────
 
-    @wh_mod.command(name="allowserver")
+    @WormholeBase.wh_mod.command(name="allowserver")
     @requires_role(Role.ADMIN)
     async def wh_mod_allowserver(self, ctx: commands.Context, name: str, guild_id: int) -> None:
         """Add a server to the allowlist."""
@@ -140,7 +136,7 @@ class ModerationCommands:
                 allow.append(guild_id)
         await ctx.send(embed=ok_embed(f"Server `{guild_id}` added to allowlist for `{name}`."))
 
-    @wh_mod.command(name="removeallow")
+    @WormholeBase.wh_mod.command(name="removeallow")
     @requires_role(Role.ADMIN)
     async def wh_mod_removeallow(self, ctx: commands.Context, name: str, guild_id: int) -> None:
         """Remove a server from the allowlist."""
@@ -152,7 +148,7 @@ class ModerationCommands:
 
     # ── Purge ──────────────────────────────────────────────────────────────
 
-    @wh_mod.command(name="purge")
+    @WormholeBase.wh_mod.command(name="purge")
     @requires_role(Role.MODERATOR)
     async def wh_mod_purge(self, ctx: commands.Context, name: str, count: int = 10) -> None:
         """Purge recent relayed messages across all channels (max 50)."""
@@ -180,7 +176,7 @@ class ModerationCommands:
 
     # ── Cross-network mod edit/delete ──────────────────────────────────────
 
-    @wh_mod.command(name="edit")
+    @WormholeBase.wh_mod.command(name="edit")
     @requires_role(Role.MODERATOR)
     async def wh_mod_edit(self, ctx: commands.Context, name: str, message_id: int, *, new_content: str) -> None:
         """Edit a relayed message across all channels."""
@@ -209,7 +205,7 @@ class ModerationCommands:
         await ctx.send(embed=ok_embed(f"Edited {edited} relayed copies."))
         await self._audit(name, "mod_edit", str(ctx.author), str(orig_id), truncate(new_content, 100))
 
-    @wh_mod.command(name="nuke")
+    @WormholeBase.wh_mod.command(name="nuke")
     @requires_role(Role.MODERATOR)
     async def wh_mod_nuke(self, ctx: commands.Context, name: str, message_id: int) -> None:
         """Delete a message and all its relayed copies across the network."""
@@ -243,7 +239,7 @@ class ModerationCommands:
 
     # ── Audit log ──────────────────────────────────────────────────────────
 
-    @wh_mod.command(name="audit")
+    @WormholeBase.wh_mod.command(name="audit")
     @requires_role(Role.HELPER)
     async def wh_mod_audit(self, ctx: commands.Context, name: str, count: int = 20) -> None:
         """View the network audit log."""
@@ -275,7 +271,7 @@ class ModerationCommands:
 
     # ── Ban/mute lists ─────────────────────────────────────────────────────
 
-    @wh_mod.command(name="bans")
+    @WormholeBase.wh_mod.command(name="bans")
     @requires_role(Role.HELPER)
     async def wh_mod_bans(self, ctx: commands.Context, name: str) -> None:
         """List banned users."""
@@ -291,7 +287,7 @@ class ModerationCommands:
             lines.append(f"• {user or uid}")
         await ctx.send(embed=info_embed("\n".join(lines), title=f"🔨 Banned Users — {name}"))
 
-    @wh_mod.command(name="mutes")
+    @WormholeBase.wh_mod.command(name="mutes")
     @requires_role(Role.HELPER)
     async def wh_mod_mutes(self, ctx: commands.Context, name: str) -> None:
         """List muted users."""

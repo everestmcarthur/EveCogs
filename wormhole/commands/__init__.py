@@ -1,5 +1,6 @@
 """Command modules — each is a mixin class inherited by the main Wormhole cog."""
 
+from ._base import WormholeBase
 from .advanced import AdvancedCommands
 from .bridge import BridgeCommands
 from .debug import DebugCommands
@@ -15,6 +16,7 @@ from .staff import StaffCommands
 from .tos import ToSCommands
 
 __all__ = [
+    "WormholeBase",
     "AdvancedCommands",
     "BridgeCommands",
     "DebugCommands",

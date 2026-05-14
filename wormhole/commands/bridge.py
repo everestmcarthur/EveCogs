@@ -7,17 +7,13 @@ from redbot.core import commands
 
 from ..models.permissions import Role, requires_role
 from ..utils import ok_embed, err_embed, info_embed, COLOUR_INFO
+from ._base import WormholeBase
 
 
-class BridgeCommands:
+class BridgeCommands(WormholeBase):
     """Mixin — network bridging and mirror channels."""
 
-    @commands.group(name="wh-bridge", aliases=["whbridge"], invoke_without_command=True)
-    async def wh_bridge(self, ctx: commands.Context) -> None:
-        """Cross-network bridging."""
-        await ctx.send_help(ctx.command)
-
-    @wh_bridge.command(name="link")
+    @WormholeBase.wh_bridge.command(name="link")
     @requires_role(Role.OWNER)
     async def wh_bridge_link(self, ctx: commands.Context, source: str, target: str) -> None:
         """Bridge messages from one network to another (one-way)."""
@@ -37,7 +33,7 @@ class BridgeCommands:
         await ctx.send(embed=ok_embed(f"Bridge: `{source}` → `{target}` (one-way)."))
         await self._audit(source, "bridge_link", str(ctx.author), target)
 
-    @wh_bridge.command(name="unlink")
+    @WormholeBase.wh_bridge.command(name="unlink")
     @requires_role(Role.OWNER)
     async def wh_bridge_unlink(self, ctx: commands.Context, source: str, target: str) -> None:
         """Remove a bridge."""
@@ -53,7 +49,7 @@ class BridgeCommands:
         await ctx.send(embed=ok_embed(f"Bridge `{source}` → `{target}` removed."))
         await self._audit(source, "bridge_unlink", str(ctx.author), target)
 
-    @wh_bridge.command(name="list")
+    @WormholeBase.wh_bridge.command(name="list")
     async def wh_bridge_list(self, ctx: commands.Context, name: str) -> None:
         """List bridges for a network."""
         nd = await self._net(name)
@@ -70,12 +66,7 @@ class BridgeCommands:
 
     # ── Mirror channels ────────────────────────────────────────────────────
 
-    @commands.group(name="wh-mirror", aliases=["whmirror"], invoke_without_command=True)
-    async def wh_mirror(self, ctx: commands.Context) -> None:
-        """Mirror channels — exact copy of relay to an extra channel."""
-        await ctx.send_help(ctx.command)
-
-    @wh_mirror.command(name="add")
+    @WormholeBase.wh_mirror.command(name="add")
     @requires_role(Role.ADMIN)
     async def wh_mirror_add(self, ctx: commands.Context, name: str, channel: discord.TextChannel) -> None:
         """Add a mirror channel."""
@@ -85,7 +76,7 @@ class BridgeCommands:
                 mirrors.append(channel.id)
         await ctx.send(embed=ok_embed(f"{channel.mention} added as mirror for `{name}`."))
 
-    @wh_mirror.command(name="remove", aliases=["rm"])
+    @WormholeBase.wh_mirror.command(name="remove", aliases=["rm"])
     @requires_role(Role.ADMIN)
     async def wh_mirror_rm(self, ctx: commands.Context, name: str, channel: discord.TextChannel) -> None:
         """Remove a mirror channel."""
@@ -95,7 +86,7 @@ class BridgeCommands:
                 mirrors.remove(channel.id)
         await ctx.send(embed=ok_embed(f"{channel.mention} removed from mirrors for `{name}`."))
 
-    @wh_mirror.command(name="list")
+    @WormholeBase.wh_mirror.command(name="list")
     async def wh_mirror_list(self, ctx: commands.Context, name: str) -> None:
         """List mirror channels."""
         nd = await self._net(name)

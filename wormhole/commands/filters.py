@@ -7,19 +7,15 @@ from redbot.core import commands
 
 from ..models.permissions import Role, requires_role
 from ..utils import ok_embed, err_embed, info_embed, COLOUR_INFO
+from ._base import WormholeBase
 
 
-class FilterCommands:
+class FilterCommands(WormholeBase):
     """Mixin — content filters and automod configuration."""
-
-    @commands.group(name="wh-filter", aliases=["whfilter"], invoke_without_command=True)
-    async def wh_filter(self, ctx: commands.Context) -> None:
-        """Manage content filters and automod."""
-        await ctx.send_help(ctx.command)
 
     # ── Word filters ───────────────────────────────────────────────────────
 
-    @wh_filter.command(name="addword")
+    @WormholeBase.wh_filter.command(name="addword")
     @requires_role(Role.MODERATOR)
     async def wh_filter_addword(self, ctx: commands.Context, name: str, *, word: str) -> None:
         """Add a word to the filter list."""
@@ -30,7 +26,7 @@ class FilterCommands:
         await ctx.send(embed=ok_embed(f"Word `{word}` added to filters for `{name}`."))
         await self._audit(name, "filter_add", str(ctx.author), word)
 
-    @wh_filter.command(name="rmword")
+    @WormholeBase.wh_filter.command(name="rmword")
     @requires_role(Role.MODERATOR)
     async def wh_filter_rmword(self, ctx: commands.Context, name: str, *, word: str) -> None:
         """Remove a word from the filter list."""
@@ -39,7 +35,7 @@ class FilterCommands:
             ns[name]["word_filters"] = [w for w in wf if w.lower() != word.lower()]
         await ctx.send(embed=ok_embed(f"Word `{word}` removed from filters for `{name}`."))
 
-    @wh_filter.command(name="addregex")
+    @WormholeBase.wh_filter.command(name="addregex")
     @requires_role(Role.ADMIN)
     async def wh_filter_addregex(self, ctx: commands.Context, name: str, *, pattern: str) -> None:
         """Add a regex pattern to the filter list."""
@@ -55,7 +51,7 @@ class FilterCommands:
         await ctx.send(embed=ok_embed(f"Regex `{pattern}` added to filters for `{name}`."))
         await self._audit(name, "regex_add", str(ctx.author), pattern)
 
-    @wh_filter.command(name="rmregex")
+    @WormholeBase.wh_filter.command(name="rmregex")
     @requires_role(Role.ADMIN)
     async def wh_filter_rmregex(self, ctx: commands.Context, name: str, *, pattern: str) -> None:
         """Remove a regex pattern from the filter list."""
@@ -65,7 +61,7 @@ class FilterCommands:
                 rf.remove(pattern)
         await ctx.send(embed=ok_embed(f"Regex removed from filters for `{name}`."))
 
-    @wh_filter.command(name="list")
+    @WormholeBase.wh_filter.command(name="list")
     @requires_role(Role.HELPER)
     async def wh_filter_list(self, ctx: commands.Context, name: str) -> None:
         """List all active filters."""
@@ -89,7 +85,7 @@ class FilterCommands:
 
     # ── Automod ────────────────────────────────────────────────────────────
 
-    @wh_filter.command(name="automod")
+    @WormholeBase.wh_filter.command(name="automod")
     @requires_role(Role.ADMIN)
     async def wh_filter_automod(self, ctx: commands.Context, name: str, feature: str, enabled: bool) -> None:
         """Toggle automod features.
@@ -131,7 +127,7 @@ class FilterCommands:
             else:
                 self.raid_detectors.pop(name, None)
 
-    @wh_filter.command(name="automod-set")
+    @WormholeBase.wh_filter.command(name="automod-set")
     @requires_role(Role.ADMIN)
     async def wh_filter_automod_set(self, ctx: commands.Context, name: str, key: str, value: str) -> None:
         """Set an automod parameter.
@@ -155,7 +151,7 @@ class FilterCommands:
 
     # ── Attachment filters ─────────────────────────────────────────────────
 
-    @wh_filter.command(name="blockext")
+    @WormholeBase.wh_filter.command(name="blockext")
     @requires_role(Role.ADMIN)
     async def wh_filter_blockext(self, ctx: commands.Context, name: str, ext: str) -> None:
         """Block a file extension (e.g. ``.exe``)."""
@@ -167,7 +163,7 @@ class FilterCommands:
                 exts.append(ext)
         await ctx.send(embed=ok_embed(f"Extension `{ext}` blocked for `{name}`."))
 
-    @wh_filter.command(name="unblockext")
+    @WormholeBase.wh_filter.command(name="unblockext")
     @requires_role(Role.ADMIN)
     async def wh_filter_unblockext(self, ctx: commands.Context, name: str, ext: str) -> None:
         """Unblock a file extension."""
@@ -179,7 +175,7 @@ class FilterCommands:
                 exts.remove(ext)
         await ctx.send(embed=ok_embed(f"Extension `{ext}` unblocked for `{name}`."))
 
-    @wh_filter.command(name="maxfilesize")
+    @WormholeBase.wh_filter.command(name="maxfilesize")
     @requires_role(Role.ADMIN)
     async def wh_filter_maxfilesize(self, ctx: commands.Context, name: str, mb: float = 0) -> None:
         """Set max file size in MB (0 to disable)."""

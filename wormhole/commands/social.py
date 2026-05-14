@@ -10,14 +10,15 @@ from redbot.core import commands
 
 from ..models.permissions import Role, has_role, requires_role, get_role, role_name
 from ..utils import ok_embed, err_embed, info_embed, star_embed, warn_embed, truncate, COLOUR_INFO, COLOUR_STAR
+from ._base import WormholeBase
 
 
-class SocialCommands:
+class SocialCommands(WormholeBase):
     """Mixin — social features."""
 
     # ── Profiles ───────────────────────────────────────────────────────────
 
-    @commands.hybrid_command(name="wh-profile")
+    @WormholeBase.wh.command(name="profile")
     async def wh_profile(self, ctx: commands.Context, name: str, user: discord.User = None) -> None:
         """View a user's wormhole profile in a network."""
         nd = await self._net(name)
@@ -46,12 +47,7 @@ class SocialCommands:
 
     # ── Karma ──────────────────────────────────────────────────────────────
 
-    @commands.group(name="wh-karma", aliases=["whkarma"], invoke_without_command=True)
-    async def wh_karma(self, ctx: commands.Context) -> None:
-        """Karma system commands."""
-        await ctx.send_help(ctx.command)
-
-    @wh_karma.command(name="enable")
+    @WormholeBase.wh_karma.command(name="enable")
     @requires_role(Role.ADMIN)
     async def wh_karma_enable(self, ctx: commands.Context, name: str, enabled: bool = True) -> None:
         """Enable or disable the karma system."""
@@ -59,7 +55,7 @@ class SocialCommands:
             ns[name]["karma_enabled"] = enabled
         await ctx.send(embed=ok_embed(f"Karma {'enabled' if enabled else 'disabled'} for `{name}`."))
 
-    @wh_karma.command(name="emoji")
+    @WormholeBase.wh_karma.command(name="emoji")
     @requires_role(Role.ADMIN)
     async def wh_karma_emoji(self, ctx: commands.Context, name: str, emoji: str = "👍") -> None:
         """Set the karma reaction emoji."""
@@ -67,7 +63,7 @@ class SocialCommands:
             ns[name]["karma_emoji"] = emoji
         await ctx.send(embed=ok_embed(f"Karma emoji set to {emoji} for `{name}`."))
 
-    @wh_karma.command(name="top")
+    @WormholeBase.wh_karma.command(name="top")
     async def wh_karma_top(self, ctx: commands.Context, name: str, count: int = 10) -> None:
         """Show karma leaderboard."""
         nd = await self._net(name)
@@ -88,12 +84,7 @@ class SocialCommands:
 
     # ── Starboard ──────────────────────────────────────────────────────────
 
-    @commands.group(name="wh-star", aliases=["whstar"], invoke_without_command=True)
-    async def wh_star(self, ctx: commands.Context) -> None:
-        """Starboard commands."""
-        await ctx.send_help(ctx.command)
-
-    @wh_star.command(name="enable")
+    @WormholeBase.wh_star.command(name="enable")
     @requires_role(Role.ADMIN)
     async def wh_star_enable(self, ctx: commands.Context, name: str, enabled: bool = True) -> None:
         """Enable or disable starboard."""
@@ -101,7 +92,7 @@ class SocialCommands:
             ns[name]["starboard_enabled"] = enabled
         await ctx.send(embed=ok_embed(f"Starboard {'enabled' if enabled else 'disabled'} for `{name}`."))
 
-    @wh_star.command(name="channel")
+    @WormholeBase.wh_star.command(name="channel")
     @requires_role(Role.ADMIN)
     async def wh_star_channel(self, ctx: commands.Context, name: str, channel: discord.TextChannel = None) -> None:
         """Set the starboard channel."""
@@ -109,7 +100,7 @@ class SocialCommands:
             ns[name]["starboard_channel"] = channel.id if channel else None
         await ctx.send(embed=ok_embed(f"Starboard channel {'set' if channel else 'cleared'} for `{name}`."))
 
-    @wh_star.command(name="threshold")
+    @WormholeBase.wh_star.command(name="threshold")
     @requires_role(Role.ADMIN)
     async def wh_star_threshold(self, ctx: commands.Context, name: str, threshold: int = 3) -> None:
         """Set minimum stars to reach the starboard."""
@@ -119,12 +110,7 @@ class SocialCommands:
 
     # ── Highlights ─────────────────────────────────────────────────────────
 
-    @commands.group(name="wh-hl", aliases=["whhl"], invoke_without_command=True)
-    async def wh_hl(self, ctx: commands.Context) -> None:
-        """Keyword highlight notifications."""
-        await ctx.send_help(ctx.command)
-
-    @wh_hl.command(name="add")
+    @WormholeBase.wh_hl.command(name="add")
     async def wh_hl_add(self, ctx: commands.Context, name: str, *, keyword: str) -> None:
         """Add a keyword to highlight."""
         async with self.config.networks() as ns:
@@ -138,7 +124,7 @@ class SocialCommands:
             user_hl.append(keyword)
         await ctx.send(embed=ok_embed(f"Highlight `{keyword}` added for `{name}`."))
 
-    @wh_hl.command(name="remove", aliases=["rm"])
+    @WormholeBase.wh_hl.command(name="remove", aliases=["rm"])
     async def wh_hl_remove(self, ctx: commands.Context, name: str, *, keyword: str) -> None:
         """Remove a highlight keyword."""
         async with self.config.networks() as ns:
@@ -147,7 +133,7 @@ class SocialCommands:
             ns[name]["highlights"][str(ctx.author.id)] = [k for k in user_hl if k.lower() != keyword.lower()]
         await ctx.send(embed=ok_embed(f"Highlight `{keyword}` removed."))
 
-    @wh_hl.command(name="list")
+    @WormholeBase.wh_hl.command(name="list")
     async def wh_hl_list(self, ctx: commands.Context, name: str) -> None:
         """List your highlights."""
         nd = await self._net(name)
@@ -160,12 +146,7 @@ class SocialCommands:
 
     # ── Bookmarks ──────────────────────────────────────────────────────────
 
-    @commands.group(name="wh-bm", aliases=["whbm"], invoke_without_command=True)
-    async def wh_bm(self, ctx: commands.Context) -> None:
-        """Message bookmarks."""
-        await ctx.send_help(ctx.command)
-
-    @wh_bm.command(name="list")
+    @WormholeBase.wh_bm.command(name="list")
     async def wh_bm_list(self, ctx: commands.Context) -> None:
         """List your bookmarks."""
         bm = await self.config.bookmarks()
@@ -181,7 +162,7 @@ class SocialCommands:
         em = discord.Embed(title="📌 Bookmarks", description="\n".join(lines), colour=COLOUR_INFO)
         await ctx.send(embed=em)
 
-    @wh_bm.command(name="clear")
+    @WormholeBase.wh_bm.command(name="clear")
     async def wh_bm_clear(self, ctx: commands.Context) -> None:
         """Clear all your bookmarks."""
         async with self.config.bookmarks() as bm:
