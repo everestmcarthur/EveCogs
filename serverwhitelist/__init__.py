@@ -1,10 +1,10 @@
-"""ServerWhitelist — Ultimate owner-only server management for Red-DiscordBot."""
+"""ServerWhitelist v3.0 — Ultimate owner-only server management for Red-DiscordBot."""
 
 from .serverwhitelist import ServerWhitelist
 
 __red_end_user_data_statement__ = (
-    "This cog stores guild IDs in a global whitelist and blacklist. "
-    "No per-user data is collected or stored."
+    "This cog stores guild IDs in a global whitelist, blacklist, and "
+    "join-attempt tracker. No per-user data is collected or stored."
 )
 
 

@@ -1,5 +1,5 @@
 """
-ServerWhitelist v2.0 — Ultimate Server Management Cog for Red-DiscordBot
+ServerWhitelist v3.0 — Ultimate Server Management Cog for Red-DiscordBot
 =========================================================================
 
 Owner-only hybrid commands to control which Discord servers the bot may
@@ -34,11 +34,21 @@ Logging
   • ``[p]join log <channel>`` — log join/leave/block events to a channel
   • ``[p]join log off``       — disable logging
 
+Attempt Tracking & Auto-Ban
+  • ``[p]join attempts``      — view all servers with join attempts
+  • ``[p]join attempts reset <id>`` — reset attempts for a server
+  • ``[p]join attempts resetall``   — reset all attempt counters
+  • ``[p]join maxattempts <n>``     — set the max attempts before auto-ban (default 5)
+
+Owner DM
+  • Bot DMs the server owner before leaving non-whitelisted/locked servers
+  • Customisable with ``[p]join setmessage <text>`` / ``[p]join resetmessage``
+
 Settings
   • ``[p]join settings``      — display current config at a glance
 
 Export
-  • ``[p]join export``        — upload a .txt file of all guilds
+  • ``[p]join export``        — upload a .txt or .csv file of all guilds
 """
 
 from __future__ import annotations
@@ -57,6 +67,14 @@ log = logging.getLogger("red.serverwhitelist")
 
 EMBED_COLOUR = 0x2F3136
 PER_PAGE = 8  # guilds per paginated page
+
+DEFAULT_LEAVE_MESSAGE = (
+    "Hello! I'm sorry, your server is not in my whitelist. "
+    "You can always try to request it to be added! Just ask the bot's owner! "
+    "If you can, however, don't add this bot until permission is given, "
+    "otherwise it will get banned and never allowed to be whitelisted! "
+    "Have a great day!"
+)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -163,7 +181,11 @@ class ServerLeaveSelect(discord.ui.Select):
             return
         name = guild.name
         await guild.leave()
-        await self.cog._log_event(f"👋 Left **{name}** (`{guild_id}`) via server browser.")
+        await self.cog._log_event(
+            title="👋 Left Server (Browser)",
+            description=f"Left **{name}** (`{guild_id}`) via server browser.",
+            colour=0xE67E22,
+        )
         await interaction.response.send_message(
             f"👋 Left **{name}** (`{guild_id}`).", ephemeral=True
         )
@@ -284,7 +306,7 @@ class ConfirmPurgeView(discord.ui.View):
 # ═══════════════════════════════════════════════════════════════════
 
 class ServerWhitelist(commands.Cog):
-    """Ultimate server management — whitelist, blacklist, browse, leave, lock & more."""
+    """Ultimate server management — whitelist, blacklist, browse, leave, lock, attempt tracking & more."""
 
     def __init__(self, bot: Red) -> None:
         self.bot = bot
@@ -298,6 +320,10 @@ class ServerWhitelist(commands.Cog):
             blacklist=[],
             locked=False,
             log_channel=None,  # int or None
+            max_attempts=5,  # auto-ban threshold
+            leave_message=None,  # custom DM text (None → DEFAULT_LEAVE_MESSAGE)
+            # Per-guild attempt tracking: { "guild_id_str": { "count": int, "last_attempt": iso, "owner_id": int, "name": str } }
+            join_attempts={},
         )
 
     # ── lifecycle ─────────────────────────────────────────────
@@ -312,13 +338,22 @@ class ServerWhitelist(commands.Cog):
         log.info(
             "ServerWhitelist loaded — %d current guild(s) merged into whitelist (%d total).",
             len(current_ids),
-            len(set(wl) | set(current_ids)),
+            len(merged),
         )
 
     # ── internal helpers ──────────────────────────────────────
 
-    async def _log_event(self, message: str) -> None:
-        """Send an event message to the configured log channel, if any."""
+    async def _log_event(
+        self,
+        description: str,
+        *,
+        title: str = "ServerWhitelist",
+        colour: int = EMBED_COLOUR,
+        fields: list[tuple[str, str, bool]] | None = None,
+        thumbnail_url: str | None = None,
+        footer: str | None = None,
+    ) -> None:
+        """Send a rich event embed to the configured log channel, if any."""
         channel_id: Optional[int] = await self.config.log_channel()
         if channel_id is None:
             return
@@ -326,15 +361,68 @@ class ServerWhitelist(commands.Cog):
         if channel is None:
             return
         try:
-            await channel.send(
-                embed=discord.Embed(
-                    description=message,
-                    colour=EMBED_COLOUR,
-                    timestamp=datetime.now(timezone.utc),
-                ).set_footer(text="ServerWhitelist")
+            em = discord.Embed(
+                title=title,
+                description=description,
+                colour=colour,
+                timestamp=datetime.now(timezone.utc),
             )
+            if thumbnail_url:
+                em.set_thumbnail(url=thumbnail_url)
+            if fields:
+                for name, value, inline in fields:
+                    em.add_field(name=name, value=value, inline=inline)
+            em.set_footer(text=footer or "ServerWhitelist v3.0")
+            await channel.send(embed=em)
         except discord.HTTPException:
             pass
+
+    def _guild_detail_fields(self, guild: discord.Guild) -> list[tuple[str, str, bool]]:
+        """Build a list of (name, value, inline) tuples with rich server info."""
+        owner = guild.owner
+        owner_str = f"{owner} (`{owner.id}`)" if owner else "Unknown"
+        created = discord.utils.format_dt(guild.created_at, style="F")
+        created_rel = discord.utils.format_dt(guild.created_at, style="R")
+        joined = (
+            discord.utils.format_dt(guild.me.joined_at, style="F")
+            if guild.me and guild.me.joined_at
+            else "Unknown"
+        )
+        joined_rel = (
+            discord.utils.format_dt(guild.me.joined_at, style="R")
+            if guild.me and guild.me.joined_at
+            else ""
+        )
+        text_ch = len(guild.text_channels)
+        voice_ch = len(guild.voice_channels)
+        categories = len(guild.categories)
+        roles = len(guild.roles)
+        emojis = len(guild.emojis)
+        boosts = guild.premium_subscription_count or 0
+        boost_tier = guild.premium_tier
+        verification = str(guild.verification_level).replace("_", " ").title()
+        humans = sum(1 for m in guild.members if not m.bot) if guild.chunked else "?"
+        bots = sum(1 for m in guild.members if m.bot) if guild.chunked else "?"
+
+        fields: list[tuple[str, str, bool]] = [
+            ("Server ID", f"`{guild.id}`", True),
+            ("Owner", owner_str, True),
+            ("Members", f"{guild.member_count:,} (👤 {humans} humans · 🤖 {bots} bots)", False),
+            ("Channels", f"💬 {text_ch} text · 🔊 {voice_ch} voice · 📁 {categories} categories", False),
+            ("Roles", str(roles), True),
+            ("Emojis", str(emojis), True),
+            ("Boosts", f"Level {boost_tier} ({boosts} boost{'s' if boosts != 1 else ''})", True),
+            ("Verification", verification, True),
+            ("Created", f"{created} ({created_rel})", False),
+            ("Bot Joined", f"{joined} {joined_rel}".strip(), False),
+        ]
+        if guild.features:
+            fields.append((
+                "Features",
+                ", ".join(f"`{f}`" for f in sorted(guild.features)[:20]),
+                False,
+            ))
+        return fields
 
     @staticmethod
     def _guild_line(guild: discord.Guild) -> str:
@@ -396,6 +484,95 @@ class ServerWhitelist(commands.Cog):
             pages.append(em)
         return pages
 
+    # ── DM the server owner ───────────────────────────────────
+
+    async def _dm_owner(
+        self,
+        guild: discord.Guild,
+        *,
+        reason: str,
+        extra: str | None = None,
+    ) -> bool:
+        """Attempt to DM the server owner before the bot leaves.
+
+        Returns True if the DM was sent successfully, False otherwise.
+        """
+        owner = guild.owner
+        if owner is None:
+            log.warning("Could not resolve owner for guild %s (%d).", guild.name, guild.id)
+            return False
+
+        leave_msg: str | None = await self.config.leave_message()
+        text = leave_msg or DEFAULT_LEAVE_MESSAGE
+
+        em = discord.Embed(
+            title="⚠️ Server Not Whitelisted",
+            description=text,
+            colour=0xFFA500,
+            timestamp=datetime.now(timezone.utc),
+        )
+        em.add_field(name="Server", value=f"**{guild.name}** (`{guild.id}`)", inline=False)
+        em.add_field(name="Reason", value=reason, inline=False)
+        if extra:
+            em.add_field(name="⚠️ Warning", value=extra, inline=False)
+        em.set_footer(text="ServerWhitelist")
+        if guild.icon:
+            em.set_thumbnail(url=guild.icon.url)
+
+        try:
+            await owner.send(embed=em)
+            log.info("Sent leave DM to owner %s (%d) of guild %s.", owner, owner.id, guild.name)
+            return True
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("Could not DM owner %s (%d): %s", owner, owner.id, exc)
+            return False
+
+    # ── attempt tracking ──────────────────────────────────────
+
+    async def _record_attempt(self, guild: discord.Guild) -> tuple[int, bool]:
+        """Record a join attempt for a guild.
+
+        Returns (current_count, was_auto_banned).
+        """
+        max_attempts: int = await self.config.max_attempts()
+        gid_str = str(guild.id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        async with self.config.join_attempts() as attempts:
+            entry = attempts.get(gid_str, {
+                "count": 0,
+                "first_attempt": now_iso,
+                "last_attempt": now_iso,
+                "owner_id": guild.owner_id,
+                "name": guild.name,
+            })
+            entry["count"] = entry.get("count", 0) + 1
+            entry["last_attempt"] = now_iso
+            entry["owner_id"] = guild.owner_id
+            entry["name"] = guild.name
+            if "first_attempt" not in entry:
+                entry["first_attempt"] = now_iso
+            attempts[gid_str] = entry
+            count = entry["count"]
+
+        auto_banned = False
+        if count >= max_attempts:
+            # Auto-ban: add to blacklist, remove from whitelist
+            async with self.config.blacklist() as bl:
+                if guild.id not in bl:
+                    bl.append(guild.id)
+                    auto_banned = True
+            async with self.config.whitelist() as wl:
+                if guild.id in wl:
+                    wl.remove(guild.id)
+            if auto_banned:
+                log.warning(
+                    "AUTO-BANNED guild %s (%d) after %d unauthorized join attempts.",
+                    guild.name, guild.id, count,
+                )
+
+        return count, auto_banned
+
     # ── listeners ─────────────────────────────────────────────
 
     @commands.Cog.listener()
@@ -404,44 +581,157 @@ class ServerWhitelist(commands.Cog):
         locked: bool = await self.config.locked()
         blacklist: list[int] = await self.config.blacklist()
         whitelist: list[int] = await self.config.whitelist()
+        max_attempts: int = await self.config.max_attempts()
 
-        # Blacklist always wins
+        # Build common log fields for rich logging
+        icon_url = guild.icon.url if guild.icon else None
+        owner = guild.owner
+        owner_str = f"{owner} (`{owner.id}`)" if owner else "Unknown"
+        log_fields: list[tuple[str, str, bool]] = [
+            ("Server", f"**{guild.name}** (`{guild.id}`)", False),
+            ("Owner", owner_str, True),
+            ("Members", f"{guild.member_count:,}" if guild.member_count else "?", True),
+            ("Created", discord.utils.format_dt(guild.created_at, style="R"), True),
+        ]
+        if guild.features:
+            log_fields.append((
+                "Features",
+                ", ".join(f"`{f}`" for f in sorted(guild.features)[:10]),
+                False,
+            ))
+
+        # ── Blacklisted ──────────────────────────────────────
         if guild.id in blacklist:
             log.info("Leaving BLACKLISTED guild: %s (%d)", guild.name, guild.id)
+
+            # Record the attempt anyway
+            count, _ = await self._record_attempt(guild)
+
+            await self._dm_owner(
+                guild,
+                reason="This server is *permanently blacklisted* and cannot use this bot.",
+                extra="⛔ This server has been *banned*. Continued attempts will be ignored.",
+            )
             await self._log_event(
-                f"🚫 Blocked join to **blacklisted** server **{guild.name}** (`{guild.id}`)."
+                title="🚫 Blocked — Blacklisted Server",
+                description=f"Rejected join to **blacklisted** server **{guild.name}**.",
+                colour=0xE74C3C,
+                fields=log_fields + [("Attempts", str(count), True)],
+                thumbnail_url=icon_url,
             )
             await guild.leave()
             return
 
-        # Lock mode — reject everything new
+        # ── Locked mode ──────────────────────────────────────
         if locked:
             log.info("Leaving guild (LOCKED mode): %s (%d)", guild.name, guild.id)
+
+            await self._dm_owner(
+                guild,
+                reason="The bot is currently in *lock mode* and not accepting any new servers.",
+            )
             await self._log_event(
-                f"🔒 Blocked join to **{guild.name}** (`{guild.id}`) — bot is *locked*."
+                title="🔒 Blocked — Bot Locked",
+                description=f"Rejected join to **{guild.name}** — bot is *locked*.",
+                colour=0x95A5A6,
+                fields=log_fields,
+                thumbnail_url=icon_url,
             )
             await guild.leave()
             return
 
-        # Normal whitelist check
+        # ── Not whitelisted ──────────────────────────────────
         if guild.id not in whitelist:
-            log.info("Leaving non-whitelisted guild: %s (%d)", guild.name, guild.id)
+            count, auto_banned = await self._record_attempt(guild)
+            remaining = max(0, max_attempts - count)
+
+            log.info(
+                "Leaving non-whitelisted guild: %s (%d) — attempt %d/%d",
+                guild.name, guild.id, count, max_attempts,
+            )
+
+            # Build warning text for DM
+            if auto_banned:
+                extra = (
+                    f"🚨 *This server has been automatically banned after "
+                    f"{count} unauthorized join attempt(s).* The bot will *never* "
+                    f"join this server again. Contact the bot owner if you believe "
+                    f"this is a mistake."
+                )
+                reason = f"Not whitelisted — *auto-banned* after {count}/{max_attempts} attempts."
+            elif remaining <= 2 and remaining > 0:
+                extra = (
+                    f"⚠️ *Warning:* This server has {count}/{max_attempts} attempts used. "
+                    f"Only *{remaining}* attempt(s) remain before an automatic permanent ban!"
+                )
+                reason = f"Not whitelisted (attempt {count}/{max_attempts})."
+            else:
+                extra = (
+                    f"ℹ️ Attempt {count}/{max_attempts}. "
+                    f"After {max_attempts} attempts the server will be *permanently banned*."
+                ) if count > 1 else None
+                reason = f"Not whitelisted (attempt {count}/{max_attempts})."
+
+            await self._dm_owner(guild, reason=reason, extra=extra)
+
+            # Log event with colour escalation
+            if auto_banned:
+                log_colour = 0xE74C3C  # Red
+                log_title = "🚨 Auto-Banned — Max Attempts Reached"
+                log_desc = (
+                    f"**{guild.name}** (`{guild.id}`) has been *automatically blacklisted* "
+                    f"after **{count}** unauthorized join attempts."
+                )
+            elif remaining <= 2:
+                log_colour = 0xE67E22  # Orange
+                log_title = f"⚠️ Non-Whitelisted Join (Attempt {count}/{max_attempts})"
+                log_desc = (
+                    f"Rejected **{guild.name}** — only **{remaining}** attempt(s) remain "
+                    f"before auto-ban."
+                )
+            else:
+                log_colour = 0xF1C40F  # Yellow
+                log_title = f"⛔ Non-Whitelisted Join (Attempt {count}/{max_attempts})"
+                log_desc = f"Rejected **{guild.name}** — not on the whitelist."
+
             await self._log_event(
-                f"⛔ Left non-whitelisted server **{guild.name}** (`{guild.id}`)."
+                title=log_title,
+                description=log_desc,
+                colour=log_colour,
+                fields=log_fields + [
+                    ("Attempts", f"{count}/{max_attempts}", True),
+                    ("Remaining", str(remaining) if not auto_banned else "BANNED", True),
+                ],
+                thumbnail_url=icon_url,
             )
             await guild.leave()
             return
 
-        # Allowed — log it
+        # ── Allowed — whitelisted ────────────────────────────
         await self._log_event(
-            f"✅ Joined whitelisted server **{guild.name}** (`{guild.id}`)."
+            title="✅ Joined Whitelisted Server",
+            description=f"Successfully joined **{guild.name}** (`{guild.id}`).",
+            colour=0x2ECC71,
+            fields=log_fields,
+            thumbnail_url=icon_url,
         )
 
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Log when the bot leaves / is removed from a guild."""
+        icon_url = guild.icon.url if guild.icon else None
+        owner = guild.owner
+        owner_str = f"{owner} (`{owner.id}`)" if owner else "Unknown"
         await self._log_event(
-            f"📤 Left/removed from **{guild.name}** (`{guild.id}`)."
+            title="📤 Left / Removed From Server",
+            description=f"No longer in **{guild.name}** (`{guild.id}`).",
+            colour=0x95A5A6,
+            fields=[
+                ("Server", f"**{guild.name}** (`{guild.id}`)", False),
+                ("Owner", owner_str, True),
+                ("Members", f"{guild.member_count:,}" if guild.member_count else "?", True),
+            ],
+            thumbnail_url=icon_url,
         )
 
     # ═══════════════════════════════════════════════════════════
@@ -458,6 +748,7 @@ class ServerWhitelist(commands.Cog):
         """Add a server to the whitelist.
 
         The bot will stay in this server when invited.
+        Also resets any accumulated join attempts for that server.
 
         Usage: ``[p]join <server_id>``
         """
@@ -475,8 +766,16 @@ class ServerWhitelist(commands.Cog):
                 return
             wl.append(server_id)
 
-        await ctx.send(f"✅ `{server_id}` has been added to the whitelist.")
-        await self._log_event(f"✅ `{server_id}` whitelisted by **{ctx.author}**.")
+        # Reset attempts on whitelist
+        async with self.config.join_attempts() as attempts:
+            attempts.pop(str(server_id), None)
+
+        await ctx.send(f"✅ `{server_id}` has been added to the whitelist. Any previous join attempts have been cleared.")
+        await self._log_event(
+            title="✅ Server Whitelisted",
+            description=f"`{server_id}` whitelisted by **{ctx.author}**.",
+            colour=0x2ECC71,
+        )
         log.info("Whitelisted guild %d (by %s).", server_id, ctx.author)
 
     # ── remove ────────────────────────────────────────────────
@@ -497,7 +796,11 @@ class ServerWhitelist(commands.Cog):
             wl.remove(server_id)
 
         await ctx.send(f"🗑️ `{server_id}` removed from the whitelist.")
-        await self._log_event(f"🗑️ `{server_id}` un-whitelisted by **{ctx.author}**.")
+        await self._log_event(
+            title="🗑️ Server Un-Whitelisted",
+            description=f"`{server_id}` un-whitelisted by **{ctx.author}**.",
+            colour=0xE67E22,
+        )
 
         guild = self.bot.get_guild(server_id)
         if guild is not None:
@@ -541,7 +844,11 @@ class ServerWhitelist(commands.Cog):
                 wl.remove(server_id)
 
         await ctx.send(f"🚫 `{server_id}` has been blacklisted.")
-        await self._log_event(f"🚫 `{server_id}` blacklisted by **{ctx.author}**.")
+        await self._log_event(
+            title="🚫 Server Blacklisted",
+            description=f"`{server_id}` blacklisted by **{ctx.author}**.",
+            colour=0xE74C3C,
+        )
 
         guild = self.bot.get_guild(server_id)
         if guild is not None:
@@ -554,6 +861,8 @@ class ServerWhitelist(commands.Cog):
     async def join_unblacklist(self, ctx: commands.Context, server_id: int) -> None:
         """Remove a server from the blacklist.
 
+        Also resets accumulated join attempts for that server.
+
         Usage: ``[p]join unblacklist <server_id>``
         """
         async with self.config.blacklist() as bl:
@@ -562,8 +871,16 @@ class ServerWhitelist(commands.Cog):
                 return
             bl.remove(server_id)
 
-        await ctx.send(f"✅ `{server_id}` removed from the blacklist.")
-        await self._log_event(f"✅ `{server_id}` un-blacklisted by **{ctx.author}**.")
+        # Reset attempts on unblacklist
+        async with self.config.join_attempts() as attempts:
+            attempts.pop(str(server_id), None)
+
+        await ctx.send(f"✅ `{server_id}` removed from the blacklist. Join attempts have been reset.")
+        await self._log_event(
+            title="✅ Server Un-Blacklisted",
+            description=f"`{server_id}` un-blacklisted by **{ctx.author}**. Attempts reset.",
+            colour=0x2ECC71,
+        )
 
     @join_group.command(name="blacklisted", aliases=["blist"])
     @commands.is_owner()
@@ -606,6 +923,9 @@ class ServerWhitelist(commands.Cog):
     async def join_info(self, ctx: commands.Context, server_id: int) -> None:
         """Show detailed information about a specific server.
 
+        Includes owner, channels, roles, emojis, boosts, verification,
+        features, whitelist/blacklist status, and join attempts.
+
         Usage: ``[p]join info <server_id>``
         """
         guild = self.bot.get_guild(server_id)
@@ -615,6 +935,8 @@ class ServerWhitelist(commands.Cog):
 
         whitelist: list[int] = await self.config.whitelist()
         blacklist: list[int] = await self.config.blacklist()
+        join_attempts: dict = await self.config.join_attempts()
+
         status_parts: list[str] = []
         if guild.id in whitelist:
             status_parts.append("✅ Whitelisted")
@@ -623,59 +945,35 @@ class ServerWhitelist(commands.Cog):
         if not status_parts:
             status_parts.append("⚪ Not listed")
 
-        text_channels = len(guild.text_channels)
-        voice_channels = len(guild.voice_channels)
-        categories = len(guild.categories)
-        roles = len(guild.roles)
-        emojis = len(guild.emojis)
-        boosts = guild.premium_subscription_count or 0
-        boost_tier = guild.premium_tier
-        created = discord.utils.format_dt(guild.created_at, style="F")
-        created_rel = discord.utils.format_dt(guild.created_at, style="R")
-        joined = (
-            discord.utils.format_dt(guild.me.joined_at, style="F")
-            if guild.me and guild.me.joined_at
-            else "Unknown"
-        )
-        joined_rel = (
-            discord.utils.format_dt(guild.me.joined_at, style="R")
-            if guild.me and guild.me.joined_at
-            else ""
-        )
-        verification = str(guild.verification_level).replace("_", " ").title()
-
         em = discord.Embed(title=guild.name, colour=EMBED_COLOUR)
         if guild.icon:
             em.set_thumbnail(url=guild.icon.url)
         if guild.banner:
             em.set_image(url=guild.banner.url)
 
-        em.add_field(name="ID", value=f"`{guild.id}`", inline=True)
-        em.add_field(name="Owner", value=str(guild.owner or "Unknown"), inline=True)
-        em.add_field(name="Status", value=" • ".join(status_parts), inline=True)
-        em.add_field(name="Members", value=f"{guild.member_count:,}", inline=True)
-        em.add_field(name="Roles", value=str(roles), inline=True)
-        em.add_field(name="Emojis", value=str(emojis), inline=True)
-        em.add_field(
-            name="Channels",
-            value=f"💬 {text_channels} text · 🔊 {voice_channels} voice · 📁 {categories} categories",
-            inline=False,
-        )
-        em.add_field(
-            name="Boosts",
-            value=f"Level {boost_tier} ({boosts} boost{'s' if boosts != 1 else ''})",
-            inline=True,
-        )
-        em.add_field(name="Verification", value=verification, inline=True)
-        em.add_field(name="Created", value=f"{created}\n{created_rel}", inline=False)
-        em.add_field(name="Bot Joined", value=f"{joined}\n{joined_rel}", inline=False)
+        # Detailed fields
+        fields = self._guild_detail_fields(guild)
+        for name, value, inline in fields:
+            em.add_field(name=name, value=value, inline=inline)
 
-        if guild.features:
+        em.add_field(name="Status", value=" • ".join(status_parts), inline=False)
+
+        # Attempt info
+        attempt_data = join_attempts.get(str(server_id))
+        if attempt_data:
+            max_att = await self.config.max_attempts()
             em.add_field(
-                name="Features",
-                value=", ".join(f"`{f}`" for f in sorted(guild.features)[:15]),
+                name="Join Attempts",
+                value=(
+                    f"**{attempt_data['count']}** / {max_att}\n"
+                    f"First: `{attempt_data.get('first_attempt', '?')}`\n"
+                    f"Last: `{attempt_data.get('last_attempt', '?')}`"
+                ),
                 inline=False,
             )
+
+        if guild.description:
+            em.add_field(name="Description", value=guild.description, inline=False)
 
         await ctx.send(embed=em)
 
@@ -720,9 +1018,15 @@ class ServerWhitelist(commands.Cog):
             return
 
         name = guild.name
+        icon_url = guild.icon.url if guild.icon else None
         await guild.leave()
         await ctx.send(f"👋 Left **{name}** (`{server_id}`).")
-        await self._log_event(f"👋 Left **{name}** (`{server_id}`) — manual leave by **{ctx.author}**.")
+        await self._log_event(
+            title="👋 Left Server (Manual)",
+            description=f"Left **{name}** (`{server_id}`) — manual leave by **{ctx.author}**.",
+            colour=0xE67E22,
+            thumbnail_url=icon_url,
+        )
 
     # ── purge ─────────────────────────────────────────────────
 
@@ -741,7 +1045,7 @@ class ServerWhitelist(commands.Cog):
             await ctx.send("✅ All current servers are whitelisted — nothing to purge.")
             return
 
-        names = "\n".join(f"• **{g.name}** (`{g.id}`)" for g in to_leave[:20])
+        names = "\n".join(f"• **{g.name}** (`{g.id}`) — {g.member_count:,} members" for g in to_leave[:20])
         extra = f"\n…and {len(to_leave) - 20} more" if len(to_leave) > 20 else ""
         em = discord.Embed(
             title="⚠️ Confirm Purge",
@@ -767,13 +1071,16 @@ class ServerWhitelist(commands.Cog):
             await msg.edit(
                 embed=discord.Embed(
                     title="🗑️ Purge Complete",
-                    description=f"Left **{len(left)}** server(s).",
+                    description=f"Left **{len(left)}** server(s):\n" + "\n".join(f"• {n}" for n in left[:30]),
                     colour=0x2ECC71,
                 ),
                 view=None,
             )
             await self._log_event(
-                f"🗑️ Purge by **{ctx.author}** — left {len(left)} server(s)."
+                title="🗑️ Purge Executed",
+                description=f"**{ctx.author}** purged {len(left)} non-whitelisted server(s).",
+                colour=0xE74C3C,
+                fields=[("Servers Left", "\n".join(f"• {n}" for n in left[:20]) or "None", False)],
             )
         else:
             await msg.edit(
@@ -799,7 +1106,11 @@ class ServerWhitelist(commands.Cog):
             return
         await self.config.locked.set(True)
         await ctx.send("🔒 Bot is now **locked** — no new servers will be joined.")
-        await self._log_event(f"🔒 Bot locked by **{ctx.author}**.")
+        await self._log_event(
+            title="🔒 Bot Locked",
+            description=f"Bot locked by **{ctx.author}** — all new joins will be rejected.",
+            colour=0x95A5A6,
+        )
 
     @join_group.command(name="unlock")
     @commands.is_owner()
@@ -813,7 +1124,11 @@ class ServerWhitelist(commands.Cog):
             return
         await self.config.locked.set(False)
         await ctx.send("🔓 Bot is now **unlocked** — whitelist rules apply normally.")
-        await self._log_event(f"🔓 Bot unlocked by **{ctx.author}**.")
+        await self._log_event(
+            title="🔓 Bot Unlocked",
+            description=f"Bot unlocked by **{ctx.author}** — whitelist rules restored.",
+            colour=0x2ECC71,
+        )
 
     # ── log channel ───────────────────────────────────────────
 
@@ -844,18 +1159,27 @@ class ServerWhitelist(commands.Cog):
     async def join_stats(self, ctx: commands.Context) -> None:
         """Show a high-level overview of the bot's server footprint.
 
+        Includes server counts, member totals, attempt stats, and more.
+
         Usage: ``[p]join stats``
         """
         whitelist: list[int] = await self.config.whitelist()
         blacklist: list[int] = await self.config.blacklist()
         locked: bool = await self.config.locked()
         log_channel: Optional[int] = await self.config.log_channel()
+        max_attempts: int = await self.config.max_attempts()
+        join_attempts: dict = await self.config.join_attempts()
 
         total_guilds = len(self.bot.guilds)
         total_members = sum(g.member_count or 0 for g in self.bot.guilds)
         largest = max(self.bot.guilds, key=lambda g: g.member_count or 0) if self.bot.guilds else None
         smallest = min(self.bot.guilds, key=lambda g: g.member_count or 0) if self.bot.guilds else None
         not_whitelisted = [g for g in self.bot.guilds if g.id not in whitelist]
+
+        # Attempt stats
+        total_attempt_servers = len(join_attempts)
+        total_attempt_count = sum(e.get("count", 0) for e in join_attempts.values())
+        auto_banned_count = sum(1 for e in join_attempts.values() if e.get("count", 0) >= max_attempts)
 
         em = discord.Embed(title="📊 Server Stats", colour=EMBED_COLOUR)
         em.add_field(name="Servers", value=f"{total_guilds:,}", inline=True)
@@ -884,6 +1208,16 @@ class ServerWhitelist(commands.Cog):
         em.add_field(
             name="Log Channel",
             value=log_ch.mention if log_ch else "Disabled",
+            inline=True,
+        )
+        em.add_field(name="Max Attempts", value=str(max_attempts), inline=True)
+        em.add_field(
+            name="Attempt Tracking",
+            value=(
+                f"**{total_attempt_servers}** server(s) tracked\n"
+                f"**{total_attempt_count}** total attempts\n"
+                f"**{auto_banned_count}** auto-banned"
+            ),
             inline=False,
         )
         await ctx.send(embed=em)
@@ -901,7 +1235,12 @@ class ServerWhitelist(commands.Cog):
         blacklist: list[int] = await self.config.blacklist()
         locked: bool = await self.config.locked()
         log_channel: Optional[int] = await self.config.log_channel()
+        max_attempts: int = await self.config.max_attempts()
+        leave_message: str | None = await self.config.leave_message()
+        join_attempts: dict = await self.config.join_attempts()
+
         log_ch = self.bot.get_channel(log_channel) if log_channel else None
+        msg_preview = (leave_message or DEFAULT_LEAVE_MESSAGE)[:120] + "…" if len(leave_message or DEFAULT_LEAVE_MESSAGE) > 120 else (leave_message or DEFAULT_LEAVE_MESSAGE)
 
         em = discord.Embed(title="⚙️ ServerWhitelist Settings", colour=EMBED_COLOUR)
         em.add_field(name="Whitelisted", value=str(len(whitelist)), inline=True)
@@ -915,6 +1254,13 @@ class ServerWhitelist(commands.Cog):
         em.add_field(
             name="Log Channel",
             value=log_ch.mention if log_ch else "Not set (`[p]join log #channel`)",
+            inline=True,
+        )
+        em.add_field(name="Max Attempts", value=f"**{max_attempts}** (before auto-ban)", inline=True)
+        em.add_field(name="Tracked Servers", value=str(len(join_attempts)), inline=True)
+        em.add_field(
+            name="Leave DM Message",
+            value=f"```{msg_preview}```",
             inline=False,
         )
         em.add_field(
@@ -925,7 +1271,11 @@ class ServerWhitelist(commands.Cog):
                 f"`{ctx.clean_prefix}join blacklist <id>` — blacklist & leave\n"
                 f"`{ctx.clean_prefix}join servers` — browse all servers\n"
                 f"`{ctx.clean_prefix}join purge` — leave all non-whitelisted\n"
-                f"`{ctx.clean_prefix}join lock/unlock` — toggle lock mode"
+                f"`{ctx.clean_prefix}join lock/unlock` — toggle lock mode\n"
+                f"`{ctx.clean_prefix}join attempts` — view join attempts\n"
+                f"`{ctx.clean_prefix}join maxattempts <n>` — set auto-ban threshold\n"
+                f"`{ctx.clean_prefix}join setmessage <text>` — custom leave DM\n"
+                f"`{ctx.clean_prefix}join resetmessage` — reset DM to default"
             ),
             inline=False,
         )
@@ -938,16 +1288,17 @@ class ServerWhitelist(commands.Cog):
     async def join_export(self, ctx: commands.Context) -> None:
         """Export the full server list as a .txt file.
 
-        Includes ID, name, member count, whitelist/blacklist status, and join date.
+        Includes ID, name, member count, whitelist/blacklist status, join date, and owner.
 
         Usage: ``[p]join export``
         """
         whitelist: list[int] = await self.config.whitelist()
         blacklist: list[int] = await self.config.blacklist()
+        join_attempts: dict = await self.config.join_attempts()
 
         lines: list[str] = [
-            f"{'ID':<22} {'Members':>8}  {'Status':<14} {'Joined':<26} Name",
-            "─" * 100,
+            f"{'ID':<22} {'Members':>8}  {'Status':<14} {'Attempts':>8}  {'Joined':<26} {'Owner':<30} Name",
+            "─" * 140,
         ]
         for g in sorted(self.bot.guilds, key=lambda g: g.member_count or 0, reverse=True):
             status_parts = []
@@ -961,11 +1312,199 @@ class ServerWhitelist(commands.Cog):
                 if g.me and g.me.joined_at
                 else "Unknown"
             )
+            owner = str(g.owner) if g.owner else "Unknown"
+            att = join_attempts.get(str(g.id), {}).get("count", 0)
             lines.append(
-                f"{g.id:<22} {g.member_count or 0:>8,}  {status:<14} {joined:<26} {g.name}"
+                f"{g.id:<22} {g.member_count or 0:>8,}  {status:<14} {att:>8}  {joined:<26} {owner:<30} {g.name}"
             )
+
+        # Also export non-joined servers from attempts
+        tracked_ids = set(int(k) for k in join_attempts.keys())
+        current_ids = set(g.id for g in self.bot.guilds)
+        non_joined = tracked_ids - current_ids
+        if non_joined:
+            lines.append("")
+            lines.append("── Tracked Servers (Not Currently Joined) ──")
+            lines.append(f"{'ID':<22} {'Attempts':>8}  {'Last Attempt':<26} {'Owner ID':<22} Name")
+            lines.append("─" * 100)
+            for gid in sorted(non_joined):
+                entry = join_attempts[str(gid)]
+                lines.append(
+                    f"{gid:<22} {entry.get('count', 0):>8}  "
+                    f"{entry.get('last_attempt', '?'):<26} "
+                    f"{entry.get('owner_id', '?')!s:<22} "
+                    f"{entry.get('name', 'Unknown')}"
+                )
 
         content = "\n".join(lines)
         buf = io.BytesIO(content.encode())
         file = discord.File(buf, filename="server_export.txt")
         await ctx.send("📄 Here's your server export:", file=file)
+
+    # ═══════════════════════════════════════════════════════════
+    #  Attempt Tracking Commands
+    # ═══════════════════════════════════════════════════════════
+
+    @join_group.group(name="attempts", aliases=["att"], invoke_without_command=True)
+    @commands.is_owner()
+    async def join_attempts_group(self, ctx: commands.Context) -> None:
+        """View all servers with recorded join attempts.
+
+        Shows attempt count, last attempt time, and auto-ban status.
+
+        Usage: ``[p]join attempts``
+        """
+        join_attempts: dict = await self.config.join_attempts()
+        max_attempts: int = await self.config.max_attempts()
+        blacklist: list[int] = await self.config.blacklist()
+
+        if not join_attempts:
+            await ctx.send("📊 No join attempts have been recorded yet.")
+            return
+
+        # Sort by count descending
+        sorted_entries = sorted(
+            join_attempts.items(),
+            key=lambda kv: kv[1].get("count", 0),
+            reverse=True,
+        )
+
+        pages: list[discord.Embed] = []
+        for i in range(0, len(sorted_entries), PER_PAGE):
+            chunk = sorted_entries[i : i + PER_PAGE]
+            em = discord.Embed(
+                title="📊 Join Attempt Tracker",
+                colour=EMBED_COLOUR,
+            )
+            for gid_str, entry in chunk:
+                gid = int(gid_str)
+                count = entry.get("count", 0)
+                name = entry.get("name", "Unknown")
+                owner_id = entry.get("owner_id", "?")
+                first = entry.get("first_attempt", "?")
+                last = entry.get("last_attempt", "?")
+                is_banned = gid in blacklist
+                status = "🚫 BANNED" if is_banned else (
+                    f"⚠️ {count}/{max_attempts}" if count >= max_attempts - 2
+                    else f"📋 {count}/{max_attempts}"
+                )
+
+                em.add_field(
+                    name=f"{name}  (`{gid}`)",
+                    value=(
+                        f"**Status:** {status}\n"
+                        f"**Attempts:** {count}\n"
+                        f"**Owner ID:** `{owner_id}`\n"
+                        f"**First:** `{first[:19] if isinstance(first, str) else first}`\n"
+                        f"**Last:** `{last[:19] if isinstance(last, str) else last}`"
+                    ),
+                    inline=False,
+                )
+            em.set_footer(text=f"Total: {len(sorted_entries)} tracked server(s) • Max: {max_attempts} attempts")
+            pages.append(em)
+
+        view = PaginatedView(pages, author_id=ctx.author.id)
+        await ctx.send(embed=pages[0], view=view)
+
+    @join_attempts_group.command(name="reset")
+    @commands.is_owner()
+    async def join_attempts_reset(self, ctx: commands.Context, server_id: int) -> None:
+        """Reset the join attempt counter for a specific server.
+
+        This does NOT remove it from the blacklist — use ``unblacklist`` for that.
+
+        Usage: ``[p]join attempts reset <server_id>``
+        """
+        async with self.config.join_attempts() as attempts:
+            if str(server_id) not in attempts:
+                await ctx.send(f"⚠️ No attempts recorded for `{server_id}`.")
+                return
+            old = attempts.pop(str(server_id))
+
+        await ctx.send(
+            f"✅ Reset attempts for `{server_id}` (was **{old.get('count', 0)}** attempts)."
+        )
+        await self._log_event(
+            title="🔄 Attempts Reset",
+            description=f"Attempts for `{server_id}` (`{old.get('name', '?')}`) reset by **{ctx.author}** (was {old.get('count', 0)}).",
+            colour=0x3498DB,
+        )
+
+    @join_attempts_group.command(name="resetall")
+    @commands.is_owner()
+    async def join_attempts_resetall(self, ctx: commands.Context) -> None:
+        """Reset ALL join attempt counters.
+
+        Does NOT affect whitelist or blacklist.
+
+        Usage: ``[p]join attempts resetall``
+        """
+        join_attempts: dict = await self.config.join_attempts()
+        count = len(join_attempts)
+        await self.config.join_attempts.set({})
+        await ctx.send(f"✅ Cleared attempt data for **{count}** server(s).")
+        await self._log_event(
+            title="🔄 All Attempts Reset",
+            description=f"All attempt counters ({count} servers) cleared by **{ctx.author}**.",
+            colour=0x3498DB,
+        )
+
+    # ═══════════════════════════════════════════════════════════
+    #  Max Attempts Configuration
+    # ═══════════════════════════════════════════════════════════
+
+    @join_group.command(name="maxattempts", aliases=["setmax", "limit"])
+    @commands.is_owner()
+    async def join_maxattempts(self, ctx: commands.Context, count: int) -> None:
+        """Set the maximum number of join attempts before a server is auto-banned.
+
+        Must be at least 1.
+
+        Usage: ``[p]join maxattempts 5``
+        """
+        if count < 1:
+            await ctx.send("⚠️ Max attempts must be at least **1**.")
+            return
+
+        old = await self.config.max_attempts()
+        await self.config.max_attempts.set(count)
+        await ctx.send(f"✅ Max attempts set to **{count}** (was {old}).")
+        await self._log_event(
+            title="⚙️ Max Attempts Updated",
+            description=f"Max attempts changed from **{old}** → **{count}** by **{ctx.author}**.",
+            colour=0x3498DB,
+        )
+
+    # ═══════════════════════════════════════════════════════════
+    #  Custom Leave DM Message
+    # ═══════════════════════════════════════════════════════════
+
+    @join_group.command(name="setmessage", aliases=["setmsg", "dmtext"])
+    @commands.is_owner()
+    async def join_setmessage(self, ctx: commands.Context, *, text: str) -> None:
+        """Set a custom DM message sent to server owners when the bot leaves.
+
+        The message is sent in a rich embed along with the server name, reason, and warnings.
+
+        Usage: ``[p]join setmessage Hello! Your server isn't whitelisted...``
+        """
+        if len(text) > 1500:
+            await ctx.send("⚠️ Message is too long (max 1,500 characters).")
+            return
+
+        await self.config.leave_message.set(text)
+        await ctx.send(
+            f"✅ Leave DM message updated!\n\n**Preview:**\n>>> {text[:500]}"
+        )
+
+    @join_group.command(name="resetmessage", aliases=["resetmsg", "defaultmsg"])
+    @commands.is_owner()
+    async def join_resetmessage(self, ctx: commands.Context) -> None:
+        """Reset the leave DM message to the default.
+
+        Usage: ``[p]join resetmessage``
+        """
+        await self.config.leave_message.set(None)
+        await ctx.send(
+            f"✅ Leave DM message reset to default:\n\n>>> {DEFAULT_LEAVE_MESSAGE}"
+        )

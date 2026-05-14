@@ -2,21 +2,25 @@
     "author": [
         "everestmcarthur"
     ],
-    "install_msg": "Thanks for installing **ServerWhitelist**!\n\nAll servers the bot is currently in have been automatically whitelisted.\n\n**Usage (bot owner only):**\n• `[p]join <server_id>` — Add a server to the whitelist so the bot can stay when invited.\n• `[p]join remove <server_id>` — Remove a server from the whitelist (the bot will leave it).\n• `[p]join list` — View every whitelisted server.\n\nAny server **not** on the whitelist will be left automatically when the bot joins.",
+    "install_msg": "Thanks for installing **ServerWhitelist v3.0**!\n\nAll servers the bot is currently in have been automatically whitelisted.\n\n**Core Commands (owner only):**\n• `[p]join <server_id>` — Whitelist a server\n• `[p]join remove <id>` — Un-whitelist & leave\n• `[p]join blacklist <id>` — Blacklist & auto-leave\n• `[p]join servers` — Browse all servers with leave controls\n• `[p]join info <id>` — Detailed server info\n• `[p]join purge` — Leave all non-whitelisted servers\n• `[p]join lock / unlock` — Toggle lock mode\n• `[p]join log #channel` — Set event log channel\n\n**New in v3.0:**\n• 🛡️ **Owner DM** — Owners get a DM explaining why the bot left\n• ⛔ **Auto-Ban** — After 5 unauthorized join attempts, the server is permanently blacklisted\n• 📊 **Attempt Tracking** — `[p]join attempts` to view/manage\n• ⚙️ **Configurable Limits** — `[p]join maxattempts <n>`\n• 💬 **Custom Leave Message** — `[p]join setmessage <text>`\n• 📝 **Rich Logging** — Detailed embeds with server info, icons, and colour-coded severity",
     "name": "ServerWhitelist",
     "disabled": false,
-    "short": "Restrict which servers the bot is allowed to stay in via an owner-only whitelist.",
-    "description": "ServerWhitelist lets the bot owner control exactly which Discord servers the bot is permitted to operate in. On first load every server the bot is already in is auto-whitelisted. The hybrid command [p]join <id> adds a new server ID to the list. When the bot joins a server that is not whitelisted it immediately leaves. Subcommands let the owner remove servers and view the full whitelist. Only the bot owner can use these commands.",
+    "short": "Restrict which servers the bot is allowed to stay in via an owner-only whitelist, with auto-ban, owner DMs, and rich logging.",
+    "description": "ServerWhitelist v3.0 lets the bot owner control exactly which Discord servers the bot is permitted to operate in. On first load every server the bot is already in is auto-whitelisted. When the bot joins a non-whitelisted server, it DMs the server owner explaining why it's leaving and tracks the attempt. After a configurable number of attempts (default 5), the server is automatically and permanently blacklisted. Features include paginated server browsing with leave controls, detailed server info embeds, search, bulk purge, lock mode, blacklist management, rich event logging with colour-coded severity, attempt tracking with reset commands, customisable leave DM messages, and full export.",
     "tags": [
         "whitelist",
+        "blacklist",
         "server",
         "owner",
         "security",
         "join",
-        "management"
+        "management",
+        "auto-ban",
+        "logging",
+        "protection"
     ],
     "type": "COG",
-    "end_user_data_statement": "This cog stores guild IDs in a global whitelist. No per-user data is collected or stored.",
+    "end_user_data_statement": "This cog stores guild IDs in a global whitelist, blacklist, and join-attempt tracker. No per-user data is collected or stored.",
     "min_bot_version": "3.5.0",
     "min_python_version": [
         3,
