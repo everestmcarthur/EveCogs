@@ -1,0 +1,22 @@
+{
+    "author": ["everestmcarthur"],
+    "install_msg": "**UserSlash** loaded!\n\n**Setup (one-time):**\n1. Go to the **Discord Developer Portal** → Your Application → **Installation**\n2. Under *Installation Contexts*, enable **User Install**\n3. Under *Default Install Settings — User Install*, add the `applications.commands` scope\n4. Run `[p]userslash sync` to register & patch commands\n5. Share the OAuth2 User-Install link so users can add your bot to their profile!\n\n⚠️ **Unload OneTrueSlash** first if you have it loaded — this cog replaces it.\n\nAll Red text commands are now accessible as slash commands in servers, DMs, and group DMs.",
+    "name": "UserSlash",
+    "disabled": false,
+    "short": "User-installable slash commands — every Red command works in servers, DMs, and group DMs.",
+    "description": "UserSlash replaces OneTrueSlash with full user-install support. It registers a single proxy slash command (named after the bot) that bridges all Red text commands, then patches every global command with user-install integration types. Commands work everywhere: guild channels, bot DMs, group DMs, and even servers where the bot isn't a member. Includes owner commands for syncing, patching, and checking status. Gracefully handles non-guild contexts with helpful error messages when a command requires a server.",
+    "tags": [
+        "slash",
+        "user-install",
+        "commands",
+        "dm",
+        "group-dm",
+        "hybrid",
+        "utility"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog does not persistently store any data or metadata about users.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "requirements": ["rapidfuzz"]
+}
