@@ -527,48 +527,6 @@ class ServerWhitelist(commands.Cog):
             log.warning("Could not DM owner %s (%d): %s", owner, owner.id, exc)
             return False
 
-    # ── self-ban ──────────────────────────────────────────────
-
-    async def _self_ban(self, guild: discord.Guild) -> bool:
-        """Attempt to ban the bot itself from the server.
-
-        This prevents the server from re-inviting the bot until they
-        manually unban it.  Requires the bot to have ``ban_members``
-        permission in the guild — if it doesn't, we silently fall back
-        to a normal leave.
-
-        Returns True if the self-ban succeeded, False otherwise.
-        """
-        me = guild.me
-        if me is None:
-            return False
-
-        # Check if the bot has ban_members permission
-        if not me.guild_permissions.ban_members:
-            log.info(
-                "Cannot self-ban from %s (%d) — missing ban_members permission.",
-                guild.name, guild.id,
-            )
-            return False
-
-        try:
-            await guild.ban(
-                me,
-                reason="ServerWhitelist: Auto-ban — this server is blacklisted.",
-                delete_message_days=0,
-            )
-            log.info("Self-banned from guild %s (%d).", guild.name, guild.id)
-            return True
-        except discord.Forbidden:
-            log.warning(
-                "Self-ban forbidden in %s (%d) despite having permission (role hierarchy?).",
-                guild.name, guild.id,
-            )
-            return False
-        except discord.HTTPException as exc:
-            log.warning("Self-ban failed in %s (%d): %s", guild.name, guild.id, exc)
-            return False
-
     # ── attempt tracking ──────────────────────────────────────
 
     async def _record_attempt(self, guild: discord.Guild) -> tuple[int, bool]:
@@ -654,22 +612,14 @@ class ServerWhitelist(commands.Cog):
                 reason="This server is *permanently blacklisted* and cannot use this bot.",
                 extra="⛔ This server has been *banned*. Continued attempts will be ignored.",
             )
-            # Attempt to self-ban (prevents re-invite until manually unbanned)
-            self_banned = await self._self_ban(guild)
-
-            ban_note = "✅ Bot self-banned from server." if self_banned else "⚠️ Could not self-ban (missing permission) — left normally."
             await self._log_event(
                 title="🚫 Blocked — Blacklisted Server",
                 description=f"Rejected join to **blacklisted** server **{guild.name}**.",
                 colour=0xE74C3C,
-                fields=log_fields + [
-                    ("Attempts", str(count), True),
-                    ("Self-Ban", ban_note, False),
-                ],
+                fields=log_fields + [("Attempts", str(count), True)],
                 thumbnail_url=icon_url,
             )
-            if not self_banned:
-                await guild.leave()
+            await guild.leave()
             return
 
         # ── Locked mode ──────────────────────────────────────
@@ -704,9 +654,9 @@ class ServerWhitelist(commands.Cog):
             if auto_banned:
                 extra = (
                     f"🚨 *This server has been automatically banned after "
-                    f"{count} unauthorized join attempt(s).* The bot has banned "
-                    f"itself from this server and will *never* join again. "
-                    f"Contact the bot owner if you believe this is a mistake."
+                    f"{count} unauthorized join attempt(s).* The bot will *never* "
+                    f"join this server again. Contact the bot owner if you believe "
+                    f"this is a mistake."
                 )
                 reason = f"Not whitelisted — *auto-banned* after {count}/{max_attempts} attempts."
             elif remaining <= 2 and remaining > 0:
@@ -744,28 +694,17 @@ class ServerWhitelist(commands.Cog):
                 log_title = f"⛔ Non-Whitelisted Join (Attempt {count}/{max_attempts})"
                 log_desc = f"Rejected **{guild.name}** — not on the whitelist."
 
-            # If auto-banned this attempt, try to self-ban from the server
-            self_banned = False
-            if auto_banned:
-                self_banned = await self._self_ban(guild)
-
-            extra_fields = [
-                ("Attempts", f"{count}/{max_attempts}", True),
-                ("Remaining", str(remaining) if not auto_banned else "BANNED", True),
-            ]
-            if auto_banned:
-                ban_note = "✅ Bot self-banned from server." if self_banned else "⚠️ Could not self-ban (missing permission) — left normally."
-                extra_fields.append(("Self-Ban", ban_note, False))
-
             await self._log_event(
                 title=log_title,
                 description=log_desc,
                 colour=log_colour,
-                fields=log_fields + extra_fields,
+                fields=log_fields + [
+                    ("Attempts", f"{count}/{max_attempts}", True),
+                    ("Remaining", str(remaining) if not auto_banned else "BANNED", True),
+                ],
                 thumbnail_url=icon_url,
             )
-            if not self_banned:
-                await guild.leave()
+            await guild.leave()
             return
 
         # ── Allowed — whitelisted ────────────────────────────
