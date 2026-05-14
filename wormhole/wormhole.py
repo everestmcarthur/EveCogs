@@ -34,9 +34,9 @@ Phase 5.3: Enhanced reply buttons — relayed replies now include a
           copy of the referenced message (if available in the target
           server) or falls back to the original message URL.
 Phase 5.4: Foreign emoji relay — custom emojis unknown to the bot are
-          replaced with clickable [:name:](cdn_url) inline links so
-          they stay compact instead of rendering as massive file
-          attachments.
+          replaced with :name: in text and their image is shown as an
+          embed thumbnail (~80×80 px) via attachment:// so they stay
+          close to real emoji size.
 """
 
 from __future__ import annotations
@@ -291,25 +291,64 @@ def _reply_jump_view(url: str) -> discord.ui.View:
     return view
 
 _CUSTOM_EMOJI_RE = re.compile(r'<(a?):(\w+):(\d+)>')
+_EMOJI_IMAGE_LIMIT = 5  # max emoji thumbnails per message
 
 
-def _resolve_foreign_emojis(bot, content: str) -> str:
-    """Replace custom emojis the bot can't see with clickable :name: links.
+async def _resolve_foreign_emojis(
+    bot, content: str
+) -> tuple[str, list[tuple[str, bytes]]]:
+    """Replace unknown custom emojis with :name: and fetch small images.
 
-    Known emojis (from any server the bot is in) are left untouched.
-    Unknown emojis become [:name:](cdn_url) — a clickable inline link
-    that lets users view the emoji image without bloating the message.
+    Returns (new_content, [(filename, image_bytes), ...]).
+    Images are shown as embed thumbnails (~80×80 px) rather than full-size
+    file attachments.
     """
+    unknown: list[tuple[str, int, str]] = []  # (name, id, ext)
 
     def _check(m: re.Match) -> str:
         animated, name, eid = m.group(1), m.group(2), int(m.group(3))
         if bot.get_emoji(eid):
             return m.group(0)  # known emoji — keep original syntax
         ext = "gif" if animated else "png"
-        url = f"https://cdn.discordapp.com/emojis/{eid}.{ext}?size=48"
-        return f"[:{name}:]({url})"
+        unknown.append((name, eid, ext))
+        return f":{name}:"
 
-    return _CUSTOM_EMOJI_RE.sub(_check, content)
+    new_content = _CUSTOM_EMOJI_RE.sub(_check, content)
+
+    emoji_data: list[tuple[str, bytes]] = []
+    if unknown:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            for name, eid, ext in unknown[:_EMOJI_IMAGE_LIMIT]:
+                try:
+                    url = f"https://cdn.discordapp.com/emojis/{eid}.{ext}?size=48"
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        if resp.status == 200:
+                            emoji_data.append((f"{name}.{ext}", await resp.read()))
+                except Exception:
+                    pass
+
+    return new_content, emoji_data
+
+
+def _emoji_embeds_and_files(
+    emoji_data: list[tuple[str, bytes]],
+) -> tuple[list[discord.Embed], list[discord.File]]:
+    """Build embed-thumbnail pairs for foreign emoji images.
+
+    Each unknown emoji gets a tiny embed whose thumbnail references the
+    attached file via ``attachment://``.  Thumbnails render at ~80×80 px —
+    much closer to real emoji size than full-size file attachments.
+    """
+    embeds: list[discord.Embed] = []
+    files: list[discord.File] = []
+    for fname, fdata in emoji_data:
+        f = discord.File(io.BytesIO(fdata), filename=fname)
+        em = discord.Embed()
+        em.set_thumbnail(url=f"attachment://{fname}")
+        files.append(f)
+        embeds.append(em)
+    return embeds, files
 
 
 _AUDIT_LIMIT = 500
@@ -420,7 +459,7 @@ class _ReportModal(discord.ui.Modal, title="Report Message"):
 class Wormhole(commands.Cog):
     """The ultimate cross-server relay: networks, DMs, starboard, auto-mod, invites, portals & more."""
 
-    __version__ = "3.4.5"
+    __version__ = "3.4.6"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -4295,10 +4334,12 @@ class Wormhole(commands.Cog):
             extra_embeds = [e for e in message.embeds if e.type == "rich"]
 
         # ── Resolve foreign emojis ─────────────────────────────────────────
-        # Unknown custom emojis become clickable [:name:](cdn_url) links so
-        # they stay inline and don't bloat the message as large file attachments.
+        # Unknown custom emojis are replaced with :name: in text.  The emoji
+        # image is downloaded and shown as an embed thumbnail (~80×80 px)
+        # via the attachment:// scheme so it stays close to real emoji size.
+        emoji_img_data: list[tuple[str, bytes]] = []
         if content:
-            content = _resolve_foreign_emojis(self.bot, content)
+            content, emoji_img_data = await _resolve_foreign_emojis(self.bot, content)
 
         # ── Relay to channels ──────────────────────────────────────────────
         mapping: Dict[int, int] = {}
@@ -4320,6 +4361,9 @@ class Wormhole(commands.Cog):
             reply_view = _reply_jump_view(jump_url) if jump_url else None
             _view_kw = {"view": reply_view} if reply_view else {}
 
+            # Fresh emoji embed-thumbnail pairs (File objects are one-use)
+            emoji_embeds, emoji_files = _emoji_embeds_and_files(emoji_img_data)
+
             try:
                 sent_msg = None
                 if ch_mode == "webhook":
@@ -4329,15 +4373,17 @@ class Wormhole(commands.Cog):
                         for a in message.attachments:
                             try: files.append(await a.to_file())
                             except: pass
+                        files.extend(emoji_files)
+                        all_embeds = (extra_embeds or []) + emoji_embeds
                         send_content = content if content else None
-                        if not send_content and not files and not extra_embeds:
+                        if not send_content and not files and not all_embeds:
                             send_content = "*[empty message]*"
                         sent_msg = await wh.send(
                             content=send_content,
                             username=truncate(uname, 80),
                             avatar_url=avatar,
                             files=files or discord.utils.MISSING,
-                            embeds=extra_embeds or discord.utils.MISSING,
+                            embeds=all_embeds[:10] or discord.utils.MISSING,
                             wait=True,
                             **_view_kw,
                         )
@@ -4349,15 +4395,19 @@ class Wormhole(commands.Cog):
                             for a in message.attachments:
                                 try: files2.append(await a.to_file())
                                 except: pass
+                            # Rebuild fresh emoji files (consumed in prior attempt)
+                            ee2, ef2 = _emoji_embeds_and_files(emoji_img_data)
+                            files2.extend(ef2)
+                            all_embeds2 = (extra_embeds or []) + ee2
                             send_content = content if content else None
-                            if not send_content and not files2 and not extra_embeds:
+                            if not send_content and not files2 and not all_embeds2:
                                 send_content = "*[empty message]*"
                             sent_msg = await wh.send(
                                 content=send_content,
                                 username=truncate(uname, 80),
                                 avatar_url=avatar,
                                 files=files2 or discord.utils.MISSING,
-                                embeds=extra_embeds or discord.utils.MISSING,
+                                embeds=all_embeds2[:10] or discord.utils.MISSING,
                                 wait=True,
                                 **_view_kw,
                             )
@@ -4383,7 +4433,15 @@ class Wormhole(commands.Cog):
                     for a in message.attachments:
                         try: files.append(await a.to_file())
                         except: pass
-                    sent_msg = await ch.send(content=compact_format(g, display, content), files=files or None, **_view_kw)
+                    # Rebuild fresh emoji files for compact mode
+                    ce, cf = _emoji_embeds_and_files(emoji_img_data)
+                    files.extend(cf)
+                    sent_msg = await ch.send(
+                        content=compact_format(g, display, content),
+                        files=files or None,
+                        embeds=ce[:10] or None,
+                        **_view_kw,
+                    )
                     mapping[ch_id] = sent_msg.id
 
                 # Ephemeral deletion
