@@ -33,6 +33,9 @@ Phase 5.3: Enhanced reply buttons — relayed replies now include a
           "Jump to replied message" URL button that links to the local
           copy of the referenced message (if available in the target
           server) or falls back to the original message URL.
+Phase 5.4: Foreign emoji relay — custom emojis unknown to the bot are
+          replaced with :name: and their 64 px image is attached as a
+          file so users still see the emoji visually.
 """
 
 from __future__ import annotations
@@ -286,6 +289,46 @@ def _reply_jump_view(url: str) -> discord.ui.View:
     ))
     return view
 
+_CUSTOM_EMOJI_RE = re.compile(r'<(a?):(\w+):(\d+)>')
+_EMOJI_IMAGE_LIMIT = 5  # max emoji images to attach per message
+
+
+async def _resolve_foreign_emojis(
+    bot, content: str
+) -> tuple[str, list[tuple[str, bytes]]]:
+    """Replace custom emojis the bot can't see with :name: and fetch images.
+
+    Returns (new_content, [(filename, image_bytes), ...]).
+    """
+    unknown: list[tuple[str, int, str]] = []  # (name, id, ext)
+
+    def _check(m: re.Match) -> str:
+        animated, name, eid = m.group(1), m.group(2), int(m.group(3))
+        if bot.get_emoji(eid):
+            return m.group(0)  # known emoji — keep original syntax
+        ext = "gif" if animated else "png"
+        unknown.append((name, eid, ext))
+        return f":{name}:"
+
+    new_content = _CUSTOM_EMOJI_RE.sub(_check, content)
+
+    # Download images from Discord CDN (already public URLs, no auth needed)
+    emoji_data: list[tuple[str, bytes]] = []
+    if unknown:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            for name, eid, ext in unknown[:_EMOJI_IMAGE_LIMIT]:
+                try:
+                    url = f"https://cdn.discordapp.com/emojis/{eid}.{ext}?size=64"
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        if resp.status == 200:
+                            emoji_data.append((f"{name}.{ext}", await resp.read()))
+                except Exception:
+                    pass  # best-effort — skip if CDN unreachable
+
+    return new_content, emoji_data
+
+
 _AUDIT_LIMIT = 500
 
 
@@ -394,7 +437,7 @@ class _ReportModal(discord.ui.Modal, title="Report Message"):
 class Wormhole(commands.Cog):
     """The ultimate cross-server relay: networks, DMs, starboard, auto-mod, invites, portals & more."""
 
-    __version__ = "3.4.3"
+    __version__ = "3.4.4"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -4268,6 +4311,14 @@ class Wormhole(commands.Cog):
         if nd.get("forward_embeds") and message.embeds:
             extra_embeds = [e for e in message.embeds if e.type == "rich"]
 
+        # ── Resolve foreign emojis ─────────────────────────────────────────
+        # If any custom emojis in the content are unknown to the bot, replace
+        # them with :name: and download the image from Discord CDN so it can
+        # be attached as a small file.
+        emoji_file_data: list[tuple[str, bytes]] = []
+        if content:
+            content, emoji_file_data = await _resolve_foreign_emojis(self.bot, content)
+
         # ── Relay to channels ──────────────────────────────────────────────
         mapping: Dict[int, int] = {}
         # Build target list: own channels + bridge_to networks' channels
@@ -4297,6 +4348,8 @@ class Wormhole(commands.Cog):
                         for a in message.attachments:
                             try: files.append(await a.to_file())
                             except: pass
+                        for fname, fdata in emoji_file_data:
+                            files.append(discord.File(io.BytesIO(fdata), filename=fname))
                         send_content = content if content else None
                         if not send_content and not files and not extra_embeds:
                             send_content = "*[empty message]*"
@@ -4317,6 +4370,8 @@ class Wormhole(commands.Cog):
                             for a in message.attachments:
                                 try: files2.append(await a.to_file())
                                 except: pass
+                            for fname, fdata in emoji_file_data:
+                                files2.append(discord.File(io.BytesIO(fdata), filename=fname))
                             send_content = content if content else None
                             if not send_content and not files2 and not extra_embeds:
                                 send_content = "*[empty message]*"
@@ -4351,6 +4406,8 @@ class Wormhole(commands.Cog):
                     for a in message.attachments:
                         try: files.append(await a.to_file())
                         except: pass
+                    for fname, fdata in emoji_file_data:
+                        files.append(discord.File(io.BytesIO(fdata), filename=fname))
                     sent_msg = await ch.send(content=compact_format(g, display, content), files=files or None, **_view_kw)
                     mapping[ch_id] = sent_msg.id
 
