@@ -4424,7 +4424,14 @@ class Wormhole(commands.Cog):
                         mapping[ch_id] = sent_msg.id
                 elif ch_mode == "embed":
                     em = build_relay_embed(message, nick, user_colour or nd.get("colour"))
-                    sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], **_view_kw)
+                    # Rebuild fresh emoji files for embed mode
+                    ee, ef = _emoji_embeds_and_files(emoji_img_data)
+                    all_embeds_e = [em] + (extra_embeds or []) + ee
+                    sent_msg = await ch.send(
+                        embeds=all_embeds_e[:10],
+                        files=ef or None,
+                        **_view_kw,
+                    )
                     mapping[ch_id] = sent_msg.id
                 elif ch_mode == "compact":
                     g = nick or message.guild.name
