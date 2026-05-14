@@ -415,6 +415,8 @@ class Wormhole(
                     nets[name]["audit_log"] = log_list[-_AUDIT_LIMIT:]
 
     async def _status(self, net_name: str, net_data: dict, src_ch: Optional[int], text: str) -> None:
+        if net_data.get("silent"):
+            return
         for ch_id in net_data.get("channels", []):
             if ch_id == src_ch:
                 continue

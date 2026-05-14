@@ -71,6 +71,14 @@ class NetworkCommands(WormholeBase):
             ns[name].setdefault("channels", []).append(ctx.channel.id)
         await ctx.send(embed=ok_embed(f"Channel linked to `{name}`. Messages will now relay."))
         await self._audit(name, "open", str(ctx.author), str(ctx.channel.id))
+        # Send welcome message if configured
+        nd_fresh = await self._net(name)
+        welcome = nd_fresh.get("welcome_message") if nd_fresh else None
+        if welcome:
+            try:
+                await ctx.channel.send(embed=info_embed(welcome, title=f"🌀 Welcome to {name}"))
+            except Exception:
+                pass
 
     @WormholeBase.wh.command(name="close")
     async def wh_close(self, ctx: commands.Context, name: str = None) -> None:

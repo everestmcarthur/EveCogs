@@ -141,6 +141,11 @@ class RelayListener:
         if message.guild.id in nd.get("muted_servers", []):
             return
 
+        # Server allowlist — if set, ONLY these servers can relay
+        allowlist = nd.get("allowlist_servers", [])
+        if allowlist and message.guild.id not in allowlist:
+            return
+
         # Rules acceptance gate
         if nd.get("rules_required"):
             accepted = nd.get("rules_accepted", {})
@@ -373,6 +378,8 @@ class RelayListener:
 
         # ── Build target list ──────────────────────────────────────────────
         relay_targets = [cid for cid in nd["channels"] if cid != eff_ch]
+        # Include mirror (receive-only) channels
+        relay_targets.extend(nd.get("mirror_channels", []))
         for bridge_net in nd.get("bridge_to", []):
             bd = nets.get(bridge_net)
             if bd and not bd.get("frozen"):
