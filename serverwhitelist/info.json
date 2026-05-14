@@ -2,11 +2,11 @@
     "author": [
         "everestmcarthur"
     ],
-    "install_msg": "Thanks for installing **ServerWhitelist v3.0**!\n\nAll servers the bot is currently in have been automatically whitelisted.\n\n**Core Commands (owner only):**\n• `[p]join <server_id>` — Whitelist a server\n• `[p]join remove <id>` — Un-whitelist & leave\n• `[p]join blacklist <id>` — Blacklist & auto-leave\n• `[p]join servers` — Browse all servers with leave controls\n• `[p]join info <id>` — Detailed server info\n• `[p]join purge` — Leave all non-whitelisted servers\n• `[p]join lock / unlock` — Toggle lock mode\n• `[p]join log #channel` — Set event log channel\n\n**New in v3.0:**\n• 🛡️ **Owner DM** — Owners get a DM explaining why the bot left\n• ⛔ **Auto-Ban** — After 5 unauthorized join attempts, the server is permanently blacklisted\n• 📊 **Attempt Tracking** — `[p]join attempts` to view/manage\n• ⚙️ **Configurable Limits** — `[p]join maxattempts <n>`\n• 💬 **Custom Leave Message** — `[p]join setmessage <text>`\n• 📝 **Rich Logging** — Detailed embeds with server info, icons, and colour-coded severity",
+    "install_msg": "Thanks for installing **ServerWhitelist v4.0** — The Ultimate Server Management Cog!\n\nAll servers the bot is currently in have been automatically whitelisted.\n\n**Core Commands (owner only):**\n• `[p]join <id>` — Whitelist a server\n• `[p]join remove/blacklist/unblacklist <id>`\n• `[p]join servers` — Browse with leave controls\n• `[p]join info/search/stats`\n• `[p]join purge/leave/lock/unlock`\n• `[p]join log #channel` — Event logging\n\n**New in v4.0:**\n• 📩 **Whitelist Requests** — Server owners can request via DM button; you approve/deny\n• 📝 **Notes & Tags** — Annotate and categorize servers\n• 🔍 **Invite Audit** — See who added the bot via audit log\n• ⏰ **Temp Whitelist** — `[p]join temp <id> 7d` for time-limited access\n• 📏 **Member Requirements** — Min/max member thresholds\n• 🔑 **Trusted Inviters** — Auto-whitelist from specific users\n• 🔔 **Owner Alerts** — DM notifications for all events\n• 💾 **Backup & Restore** — Full config export/import\n• 🛡️ Owner DM, auto-ban, attempt tracking, rich logging (from v3)",
     "name": "ServerWhitelist",
     "disabled": false,
-    "short": "Restrict which servers the bot is allowed to stay in via an owner-only whitelist, with auto-ban, owner DMs, and rich logging.",
-    "description": "ServerWhitelist v3.0 lets the bot owner control exactly which Discord servers the bot is permitted to operate in. On first load every server the bot is already in is auto-whitelisted. When the bot joins a non-whitelisted server, it DMs the server owner explaining why it's leaving and tracks the attempt. After a configurable number of attempts (default 5), the server is automatically and permanently blacklisted. Features include paginated server browsing with leave controls, detailed server info embeds, search, bulk purge, lock mode, blacklist management, rich event logging with colour-coded severity, attempt tracking with reset commands, customisable leave DM messages, and full export.",
+    "short": "The ultimate cog to control which servers the bot can be in — whitelist, blacklist, requests, temp access, trusted inviters, notes, tags, alerts, backup & more.",
+    "description": "ServerWhitelist v4.0 is the definitive server management cog for Red-DiscordBot. It gives bot owners complete control over which Discord servers the bot operates in. Features include: whitelist/blacklist with paginated views, interactive server browser with leave dropdowns, detailed server info embeds, search, bulk purge, lock mode, rich colour-coded event logging, attempt tracking with auto-ban after configurable threshold, owner DM with customizable message, whitelist request system with approve/deny buttons, server notes and tags for organization, invite audit via Discord audit logs, temporary time-limited whitelist, min/max member requirements, trusted inviters for auto-whitelist, owner DM alerts for all events, full config backup and restore, and comprehensive export. Every action is logged and auditable.",
     "tags": [
         "whitelist",
         "blacklist",
@@ -17,10 +17,15 @@
         "management",
         "auto-ban",
         "logging",
-        "protection"
+        "protection",
+        "requests",
+        "notes",
+        "tags",
+        "backup",
+        "trusted"
     ],
     "type": "COG",
-    "end_user_data_statement": "This cog stores guild IDs in a global whitelist, blacklist, and join-attempt tracker. No per-user data is collected or stored.",
+    "end_user_data_statement": "This cog stores guild IDs in a global whitelist, blacklist, join-attempt tracker, notes, tags, and whitelist request queue. No per-user data is collected or stored beyond requester IDs in the request queue.",
     "min_bot_version": "3.5.0",
     "min_python_version": [
         3,
