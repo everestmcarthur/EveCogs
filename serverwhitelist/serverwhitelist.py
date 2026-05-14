@@ -2,7 +2,7 @@
 ServerWhitelist v4.0 — The Ultimate Server Management Cog for Red-DiscordBot
 =============================================================================
 
-Owner-only hybrid commands to control which Discord servers the bot may
+Owner-only commands to control which Discord servers the bot may
 operate in.  Uses Red's Config for persistence and discord.py Views for
 interactive UI (paginated embeds, dropdowns, approval buttons, etc.).
 
@@ -1058,7 +1058,7 @@ class ServerWhitelist(commands.Cog):
     #  Command Group
     # ═══════════════════════════════════════════════════════════
 
-    @commands.hybrid_group(name="join", invoke_without_command=True, fallback="add")
+    @commands.group(name="join", invoke_without_command=True)
     @commands.is_owner()
     async def join_group(self, ctx: commands.Context, server_id: int) -> None:
         """Add a server to the whitelist."""
