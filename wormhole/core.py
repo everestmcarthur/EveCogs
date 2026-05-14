@@ -164,9 +164,11 @@ class Wormhole(
     # ── Context menu registration ──────────────────────────────────────────
 
     def _register_context_menus(self) -> None:
-        """Register slash commands and context menus."""
+        """Register context menus.
 
-        # ── Context menus ──
+        Note: slash commands are handled automatically by Red's hybrid_command
+        decorator on the mixin classes — do NOT manually register duplicates.
+        """
         ctx_report = app_commands.ContextMenu(name="Report to Wormhole", callback=self._ctx_report_message)
         ctx_bookmark = app_commands.ContextMenu(name="Bookmark (Wormhole)", callback=self._ctx_bookmark_message)
         ctx_delete = app_commands.ContextMenu(name="Delete from Network", callback=self._ctx_delete_message)
@@ -176,58 +178,11 @@ class Wormhole(
         self.bot.tree.add_command(ctx_delete)
         self.bot.tree.add_command(ctx_profile)
 
-        # ── Slash commands ──
-        @app_commands.command(name="wh-list", description="List wormhole networks")
-        async def slash_list(interaction: discord.Interaction):
-            ctx = await commands.Context.from_interaction(interaction)
-            await self.wh_list(ctx)
-
-        @app_commands.command(name="wh-info", description="Info about a network")
-        @app_commands.describe(name="Network name")
-        async def slash_info(interaction: discord.Interaction, name: str):
-            ctx = await commands.Context.from_interaction(interaction)
-            await self.wh_info(ctx, name)
-
-        @app_commands.command(name="wh-accept", description="Accept network rules")
-        @app_commands.describe(name="Network name")
-        async def slash_accept(interaction: discord.Interaction, name: str):
-            ctx = await commands.Context.from_interaction(interaction)
-            await self.wh_accept(ctx, name)
-
-        @app_commands.command(name="wh-agree", description="Agree to network ToS")
-        @app_commands.describe(name="Network name")
-        async def slash_agree(interaction: discord.Interaction, name: str):
-            ctx = await commands.Context.from_interaction(interaction)
-            await self.wh_agree(ctx, name)
-
-        @app_commands.command(name="wh-report", description="Report a message")
-        @app_commands.describe(message_id="Message ID to report", reason="Reason")
-        async def slash_report(interaction: discord.Interaction, message_id: str, reason: str = "No reason provided"):
-            ctx = await commands.Context.from_interaction(interaction)
-            await self.wh_report_msg(ctx, int(message_id), reason=reason)
-
-        @app_commands.command(name="wh-profile", description="View a user's wormhole profile")
-        @app_commands.describe(name="Network name", user="User to look up")
-        async def slash_profile(interaction: discord.Interaction, name: str, user: discord.User = None):
-            ctx = await commands.Context.from_interaction(interaction)
-            await self.wh_profile(ctx, name, user)
-
-        @app_commands.command(name="wh-discover", description="Discover public networks")
-        async def slash_discover(interaction: discord.Interaction):
-            ctx = await commands.Context.from_interaction(interaction)
-            await self.wh_discover(ctx)
-
-        for cmd in (slash_list, slash_info, slash_accept, slash_agree,
-                    slash_report, slash_profile, slash_discover):
-            self.bot.tree.add_command(cmd)
-
     async def cog_unload(self) -> None:
         for task in self._bg_tasks:
             task.cancel()
         for cmd_name in ("Report to Wormhole", "Bookmark (Wormhole)",
-                         "Delete from Network", "Wormhole Profile",
-                         "wh-list", "wh-info", "wh-accept", "wh-agree",
-                         "wh-report", "wh-profile", "wh-discover"):
+                         "Delete from Network", "Wormhole Profile"):
             self.bot.tree.remove_command(cmd_name)
 
     # ── Background task loops ──────────────────────────────────────────────
