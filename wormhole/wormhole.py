@@ -4274,6 +4274,7 @@ class Wormhole(commands.Cog):
             # Build reply-jump view for this channel (if replying)
             jump_url = reply_jump_urls.get(ch_id) or reply_fallback_url
             reply_view = _reply_jump_view(jump_url) if jump_url else None
+            _view_kw = {"view": reply_view} if reply_view else {}
 
             try:
                 sent_msg = None
@@ -4293,8 +4294,8 @@ class Wormhole(commands.Cog):
                             avatar_url=avatar,
                             files=files or discord.utils.MISSING,
                             embeds=extra_embeds or discord.utils.MISSING,
-                            view=reply_view,
                             wait=True,
+                            **_view_kw,
                         )
                         mapping[ch_id] = sent_msg.id
                     except (discord.NotFound, discord.InvalidData):
@@ -4313,23 +4314,23 @@ class Wormhole(commands.Cog):
                                 avatar_url=avatar,
                                 files=files2 or discord.utils.MISSING,
                                 embeds=extra_embeds or discord.utils.MISSING,
-                                view=reply_view,
                                 wait=True,
+                                **_view_kw,
                             )
                             mapping[ch_id] = sent_msg.id
                         except Exception:
                             log.warning("Webhook retry failed for %s, falling back to embed", ch_id)
                             em = build_relay_embed(message, nick, nd.get("colour"))
-                            sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], view=reply_view)
+                            sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], **_view_kw)
                             mapping[ch_id] = sent_msg.id
                     except discord.Forbidden:
                         log.warning("No webhook perms in %s, falling back to embed", ch_id)
                         em = build_relay_embed(message, nick, nd.get("colour"))
-                        sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], view=reply_view)
+                        sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], **_view_kw)
                         mapping[ch_id] = sent_msg.id
                 elif ch_mode == "embed":
                     em = build_relay_embed(message, nick, user_colour or nd.get("colour"))
-                    sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], view=reply_view)
+                    sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], **_view_kw)
                     mapping[ch_id] = sent_msg.id
                 elif ch_mode == "compact":
                     g = nick or message.guild.name
@@ -4338,7 +4339,7 @@ class Wormhole(commands.Cog):
                     for a in message.attachments:
                         try: files.append(await a.to_file())
                         except: pass
-                    sent_msg = await ch.send(content=compact_format(g, display, content), files=files or None, view=reply_view)
+                    sent_msg = await ch.send(content=compact_format(g, display, content), files=files or None, **_view_kw)
                     mapping[ch_id] = sent_msg.id
 
                 # Ephemeral deletion
