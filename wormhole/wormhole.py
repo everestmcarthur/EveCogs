@@ -29,6 +29,10 @@ Phase 5.2: Fix empty-prefix bug — get_context() with an empty-string prefix
           matched every message, silently blocking all relay traffic.  Now
           requires ctx.prefix to be non-empty before filtering.  Re-added
           empty-prefix warning to wh debug.
+Phase 5.3: Enhanced reply buttons — relayed replies now include a
+          "Jump to replied message" URL button that links to the local
+          copy of the referenced message (if available in the target
+          server) or falls back to the original message URL.
 """
 
 from __future__ import annotations
@@ -270,6 +274,18 @@ _DEFAULT_GLOBAL = {
 }
 
 _MAP_LIMIT = 2_000
+
+
+def _reply_jump_view(url: str) -> discord.ui.View:
+    """Build a View with a single URL button that jumps to the replied message."""
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(
+        style=discord.ButtonStyle.link,
+        label="↩ Jump to replied message",
+        url=url,
+    ))
+    return view
+
 _AUDIT_LIMIT = 500
 
 
@@ -378,7 +394,7 @@ class _ReportModal(discord.ui.Modal, title="Report Message"):
 class Wormhole(commands.Cog):
     """The ultimate cross-server relay: networks, DMs, starboard, auto-mod, invites, portals & more."""
 
-    __version__ = "3.4.2"
+    __version__ = "3.4.3"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -4203,12 +4219,31 @@ class Wormhole(commands.Cog):
         user_colour = nd.get("user_colours", {}).get(str(message.author.id))
 
         # Reply context
+        reply_jump_urls: Dict[int, str] = {}   # {target_ch_id: jump_url}
+        reply_fallback_url: Optional[str] = None
         if nd.get("sync_replies") and message.reference and message.reference.message_id:
             try:
                 ref = message.reference.cached_message or await message.channel.fetch_message(message.reference.message_id)
                 ref_name = self._anon_name(nd, ref.author.id) if is_anon else ref.author.display_name
                 preview = truncate(ref.content, 100) if ref.content else "*[attachment]*"
                 content = f"> **↩ {ref_name}:** {preview}\n{content}"
+
+                # Build per-channel "Jump to replied message" URLs
+                if ref.guild:
+                    reply_fallback_url = f"https://discord.com/channels/{ref.guild.id}/{ref.channel.id}/{ref.id}"
+                    # Look up relayed copies of the referenced message
+                    orig_ref_id = self.msg_map.get_original(net_name, ref.id)
+                    ref_relayed = (
+                        self.msg_map.forward.get(net_name, {}).get(orig_ref_id, {})
+                        if orig_ref_id
+                        else self.msg_map.forward.get(net_name, {}).get(ref.id, {})
+                    )
+                    for cid, mid in ref_relayed.items():
+                        target_ch = self.bot.get_channel(cid)
+                        if target_ch and target_ch.guild:
+                            reply_jump_urls[cid] = f"https://discord.com/channels/{target_ch.guild.id}/{cid}/{mid}"
+                    # Include the channel where the ref message lives
+                    reply_jump_urls.setdefault(ref.channel.id, reply_fallback_url)
             except: content = f"> ↩ *[reply]*\n{content}"
 
         # Stickers
@@ -4235,6 +4270,11 @@ class Wormhole(commands.Cog):
             ch = self.bot.get_channel(ch_id)
             if not ch: continue
             ch_mode = self._get_override(nd, ch_id, "relay_mode") or relay_mode
+
+            # Build reply-jump view for this channel (if replying)
+            jump_url = reply_jump_urls.get(ch_id) or reply_fallback_url
+            reply_view = _reply_jump_view(jump_url) if jump_url else None
+
             try:
                 sent_msg = None
                 if ch_mode == "webhook":
@@ -4253,6 +4293,7 @@ class Wormhole(commands.Cog):
                             avatar_url=avatar,
                             files=files or discord.utils.MISSING,
                             embeds=extra_embeds or discord.utils.MISSING,
+                            view=reply_view,
                             wait=True,
                         )
                         mapping[ch_id] = sent_msg.id
@@ -4272,22 +4313,23 @@ class Wormhole(commands.Cog):
                                 avatar_url=avatar,
                                 files=files2 or discord.utils.MISSING,
                                 embeds=extra_embeds or discord.utils.MISSING,
+                                view=reply_view,
                                 wait=True,
                             )
                             mapping[ch_id] = sent_msg.id
                         except Exception:
                             log.warning("Webhook retry failed for %s, falling back to embed", ch_id)
                             em = build_relay_embed(message, nick, nd.get("colour"))
-                            sent_msg = await ch.send(embeds=[em] + extra_embeds[:9])
+                            sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], view=reply_view)
                             mapping[ch_id] = sent_msg.id
                     except discord.Forbidden:
                         log.warning("No webhook perms in %s, falling back to embed", ch_id)
                         em = build_relay_embed(message, nick, nd.get("colour"))
-                        sent_msg = await ch.send(embeds=[em] + extra_embeds[:9])
+                        sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], view=reply_view)
                         mapping[ch_id] = sent_msg.id
                 elif ch_mode == "embed":
                     em = build_relay_embed(message, nick, user_colour or nd.get("colour"))
-                    sent_msg = await ch.send(embeds=[em] + extra_embeds[:9])
+                    sent_msg = await ch.send(embeds=[em] + extra_embeds[:9], view=reply_view)
                     mapping[ch_id] = sent_msg.id
                 elif ch_mode == "compact":
                     g = nick or message.guild.name
@@ -4296,7 +4338,7 @@ class Wormhole(commands.Cog):
                     for a in message.attachments:
                         try: files.append(await a.to_file())
                         except: pass
-                    sent_msg = await ch.send(content=compact_format(g, display, content), files=files or None)
+                    sent_msg = await ch.send(content=compact_format(g, display, content), files=files or None, view=reply_view)
                     mapping[ch_id] = sent_msg.id
 
                 # Ephemeral deletion
