@@ -24,8 +24,11 @@ from redbot.core.utils.chat_formatting import humanize_list, pagify
 
 log = logging.getLogger("red.evecogs.newhelpmenu.formatter")
 
+# Discord limits: 25 fields per embed, 6000 chars total
+# We use conservative limits to ensure clean formatting
 MAX_FIELDS_PER_PAGE = 6  # Keep pages clean, not cramped
-EMBED_CHAR_LIMIT = 5800
+EMBED_CHAR_LIMIT = 5800  # Leave buffer below Discord's 6000 limit
+MAX_CATEGORIES_IN_OVERVIEW = 18  # Stay well under 25 field limit
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -55,21 +58,29 @@ async def gather_bot_help_data(
 
     cog_commands: Dict[str, List[commands.Command]] = defaultdict(list)
 
+    # Gather all commands first, then batch permission checks for efficiency
+    pending_checks: List[Tuple[commands.Command, str]] = []
+
     for cmd in sorted(bot.commands, key=lambda c: c.qualified_name):
         if cmd.hidden and not show_hidden:
             continue
         if cmd.qualified_name in blacklisted_commands:
             continue
-        try:
-            if not await cmd.can_run(ctx):
-                continue
-        except Exception:
-            continue
 
         cog_name = cmd.cog_name or "No Category"
         if cog_name in blacklisted_cogs:
             continue
-        cog_commands[cog_name].append(cmd)
+
+        pending_checks.append((cmd, cog_name))
+
+    # Run permission checks (this is the slow part)
+    for cmd, cog_name in pending_checks:
+        try:
+            if await cmd.can_run(ctx):
+                cog_commands[cog_name].append(cmd)
+        except Exception:
+            # Permission check failed, skip this command
+            pass
 
     cog_to_category: Dict[str, str] = {}
     for cat_name, cog_list in categories.items():
@@ -357,9 +368,9 @@ def build_bot_help_embeds(
 
     # Show categories as compact inline fields
     for i, (cat_name, emoji, cmds) in enumerate(category_data):
-        if i >= 18:  # Stay well under 25
+        if i >= MAX_CATEGORIES_IN_OVERVIEW:
             overview.add_field(
-                name=f"… +{len(category_data) - 18} more",
+                name=f"… +{len(category_data) - MAX_CATEGORIES_IN_OVERVIEW} more",
                 value=f"Use the dropdown to browse.",
                 inline=False,
             )
@@ -374,7 +385,7 @@ def build_bot_help_embeds(
         )
 
     # Pad with empty inline field if odd number for cleaner grid
-    field_count = min(len(category_data), 18)
+    field_count = min(len(category_data), MAX_CATEGORIES_IN_OVERVIEW)
     if field_count % 2 == 1:
         overview.add_field(name="\u200b", value="\u200b", inline=True)
 

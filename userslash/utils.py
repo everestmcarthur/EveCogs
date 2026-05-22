@@ -16,6 +16,8 @@ try:
 except ImportError:
     import re
 
+# Discord's limit for slash command names
+SLASH_COMMAND_NAME_MAX_LENGTH = 32
 
 # ContextVar holding the current InterContext for the active interaction
 contexts: ContextVar["InterContext"] = ContextVar("userslash_contexts")
@@ -28,7 +30,7 @@ def valid_app_name(name: str) -> str:
     name = "_".join(
         re.findall(VALID_SLASH_COMMAND_NAME.pattern.strip("^$"), name.lower())
     )
-    return validate_name(name[:32])
+    return validate_name(name[:SLASH_COMMAND_NAME_MAX_LENGTH])
 
 
 class Thinking:

@@ -117,8 +117,19 @@ class InterContext(commands.Context):
     async def send(self, *args, **kwargs):
         interaction = self._interaction
         if interaction.is_expired():
-            assert interaction.channel
-            return await interaction.channel.send(*args, **kwargs)  # type: ignore
+            # Interaction expired - try to fall back to channel send
+            if interaction.channel:
+                try:
+                    return await interaction.channel.send(*args, **kwargs)  # type: ignore
+                except (discord.HTTPException, AttributeError) as e:
+                    # Fabricated DM channel or permissions issue
+                    import logging
+                    log = logging.getLogger("red.evecogs.userslash.context")
+                    log.warning(f"Failed to send via expired interaction channel: {e}")
+                    raise discord.InteractionResponded("Interaction expired and fallback send failed") from e
+            else:
+                raise discord.InteractionResponded("Interaction expired with no channel available")
+
         await self.typing(ephemeral=True)
         self._deferring = False
         delete_after = kwargs.pop("delete_after", None)

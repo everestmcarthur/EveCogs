@@ -29,6 +29,11 @@ from .utils import walk_aliases
 
 LOG = logging.getLogger("red.evecogs.userslash.slash_bridge")
 
+# Constants
+MAX_SLASH_COMMAND_NAME_LENGTH = 32
+AUTOCOMPLETE_USER_INSTALL_LIMIT = 24
+AUTOCOMPLETE_GUILD_LIMIT = 6
+
 
 # ------------------------------------------------------------------
 # Context helpers
@@ -95,17 +100,30 @@ async def _check_whitelist(interaction: discord.Interaction) -> bool:
         interaction.command, "extras", {}
     ).get("_userslash_config")
     if config is None:
+        LOG.debug("Whitelist check: config not available, allowing")
         return True  # config not wired yet — allow
 
     # If the bot is a full member of this guild, skip the whitelist
-    if interaction.guild and interaction.guild.me:
+    # More robust check: interaction.guild_id present but guild not in cache = not a member
+    if interaction.guild and getattr(interaction.guild, "me", None):
         return True
 
-    if not await config.whitelist_enabled():
-        return True
+    try:
+        if not await config.whitelist_enabled():
+            return True
+    except Exception as e:
+        LOG.warning(f"Failed to check whitelist status: {e}")
+        return True  # Fail open
 
-    whitelist: list = await config.whitelisted_users()
-    return interaction.user.id in whitelist
+    try:
+        whitelist: list = await config.whitelisted_users()
+        result = interaction.user.id in whitelist
+        if not result:
+            LOG.info(f"User {interaction.user.id} blocked by whitelist in user-install context")
+        return result
+    except Exception as e:
+        LOG.error(f"Failed to fetch whitelist: {e}")
+        return True  # Fail open to avoid breaking functionality
 
 
 # ------------------------------------------------------------------
@@ -135,19 +153,25 @@ async def user_slash_command(
     set_contextual_locale(str(interaction.guild_locale or interaction.locale))
 
     # --- Whitelist gate ---
-    if not await _check_whitelist(interaction):
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "❌ You are not authorised to use this bot via user-install. "
-                "Ask a bot owner to add you with `[p]userslash whitelist add`.",
-                ephemeral=True,
-            )
-        return
+    try:
+        if not await _check_whitelist(interaction):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ You are not authorised to use this bot via user-install. "
+                    "Ask a bot owner to add you with `[p]userslash whitelist add`.",
+                    ephemeral=True,
+                )
+            return
+    except Exception as e:
+        LOG.exception(f"Whitelist check failed for user {interaction.user.id}: {e}")
+        # Fail open - allow command to proceed rather than break functionality
+        pass
 
     # --- Block guild-only commands in user-install contexts ---
     if _is_user_install_context(interaction):
         probe = interaction.client.get_command(command)
         if probe and _command_needs_guild(probe):
+            LOG.debug(f"Blocked guild-only command '{command}' in user-install context")
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     f"❌ `{command}` requires a server context and can't be "
@@ -289,7 +313,7 @@ async def _autocomplete(
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 heapq.nlargest,
-                24 if user_install else 6,
+                AUTOCOMPLETE_USER_INSTALL_LIMIT if user_install else AUTOCOMPLETE_GUILD_LIMIT,
                 pool,
                 functools.partial(fuzz.token_sort_ratio, current),
             ),
@@ -298,7 +322,7 @@ async def _autocomplete(
     else:
         if user_install:
             # Show available DM-compatible commands when nothing is typed yet
-            extracted = pool[:24]
+            extracted = pool[:AUTOCOMPLETE_USER_INSTALL_LIMIT]
             extracted.append("help")
         else:
             extracted = ["help"]
@@ -335,6 +359,9 @@ async def _autocomplete(
 async def _error(interaction: discord.Interaction, error: Exception):
     assert isinstance(interaction.client, Red)
 
+    # Log the original error for debugging
+    LOG.error(f"Slash command error for user {interaction.user.id}: {error}", exc_info=error)
+
     if isinstance(error, app_commands.CommandInvokeError):
         error = error.original
     original = getattr(error, "original", error)
@@ -352,14 +379,17 @@ async def _error(interaction: discord.Interaction, error: Exception):
                     "❌ This command cannot be used here (it may require a server).",
                     ephemeral=True,
                 )
-        except discord.HTTPException:
-            pass
+        except discord.HTTPException as e:
+            LOG.warning(f"Failed to send error message: {e}")
         return
 
     # Everything else — forward to Red's built-in error handler
-    ctx = await InterContext.from_interaction(
-        interaction, recreate_message=True
-    )
-    await interaction.client.on_command_error(
-        ctx, commands.CommandInvokeError(original)
-    )
+    try:
+        ctx = await InterContext.from_interaction(
+            interaction, recreate_message=True
+        )
+        await interaction.client.on_command_error(
+            ctx, commands.CommandInvokeError(original)
+        )
+    except Exception as e:
+        LOG.exception(f"Failed to forward error to Red's handler: {e}")

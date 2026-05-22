@@ -70,6 +70,13 @@ class UserSlash(commands.Cog):
         if self._slash_registered:
             self.bot.tree.remove_command(user_slash_command.name, guild=None)
 
+        # Clean up context variable to prevent leaks
+        from .utils import contexts
+        try:
+            contexts.set(None)  # type: ignore
+        except (LookupError, TypeError):
+            pass  # Already empty
+
     async def _delayed_setup(self) -> None:
         """Wait for the bot to be fully ready, then register the slash command."""
         await self.bot.wait_until_red_ready()

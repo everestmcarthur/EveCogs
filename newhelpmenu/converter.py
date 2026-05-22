@@ -17,19 +17,29 @@ from discord import ui
 # ──────────────────────────── helpers ────────────────────────────
 
 def _truncate(text: str, limit: int = 4000) -> str:
-    """Truncate to Discord's TextDisplay limit."""
+    """Truncate to Discord's TextDisplay limit, attempting to preserve word boundaries."""
     if len(text) <= limit:
         return text
-    return text[: limit - 3] + "..."
+
+    # Try to break at last space before limit
+    truncated = text[: limit - 3]
+    last_space = truncated.rfind(" ")
+    if last_space > limit * 0.8:  # Only use space if it's not too far back
+        truncated = truncated[:last_space]
+
+    return truncated + "..."
 
 
 def _field_to_md(field: Any) -> str:
-    """Convert an embed field to markdown."""
-    name = getattr(field, "name", "") or ""
-    value = getattr(field, "value", "") or ""
-    if name:
-        return f"**{name}**\n{value}"
-    return value
+    """Convert an embed field to markdown with safe attribute access."""
+    try:
+        name = getattr(field, "name", "") or ""
+        value = getattr(field, "value", "") or ""
+        if name:
+            return f"**{name}**\n{value}"
+        return value
+    except (AttributeError, TypeError):
+        return str(field) if field else ""
 
 
 # ──────────────────────────── core ────────────────────────────
@@ -67,26 +77,32 @@ def embed_to_container(
 
     container = ui.Container(accent_colour=discord.Colour(color))
 
-    # ── Author line ──
+    # ── Author line ── (with safe attribute access)
     author_text = ""
-    if embed.author and embed.author.name:
-        author_name = embed.author.name
-        if embed.author.url:
-            author_text = f"[{author_name}]({embed.author.url})"
-        else:
-            author_text = author_name
+    try:
+        if embed.author and getattr(embed.author, "name", None):
+            author_name = embed.author.name
+            if getattr(embed.author, "url", None):
+                author_text = f"[{author_name}]({embed.author.url})"
+            else:
+                author_text = author_name
+    except (AttributeError, TypeError):
+        pass
 
-    # ── Title + URL ──
+    # ── Title + URL ── (with safe attribute access)
     title_text = ""
-    if embed.title:
-        title = embed.title
-        if embed.url:
-            title_text = f"### [{title}]({embed.url})"
-        else:
-            title_text = f"### {title}"
+    try:
+        if embed.title:
+            title = embed.title
+            if getattr(embed, "url", None):
+                title_text = f"### [{title}]({embed.url})"
+            else:
+                title_text = f"### {title}"
+    except (AttributeError, TypeError):
+        pass
 
-    # ── Description ──
-    desc_text = embed.description or ""
+    # ── Description ── (with safe attribute access)
+    desc_text = getattr(embed, "description", "") or ""
 
     # Build the header block — combine author, title, description
     header_parts = []
@@ -101,8 +117,11 @@ def embed_to_container(
 
     # ── Thumbnail? → use Section with accessory ──
     thumbnail_url = None
-    if show_thumbnail and embed.thumbnail and embed.thumbnail.url:
-        thumbnail_url = embed.thumbnail.url
+    try:
+        if show_thumbnail and getattr(embed, "thumbnail", None) and getattr(embed.thumbnail, "url", None):
+            thumbnail_url = embed.thumbnail.url
+    except (AttributeError, TypeError):
+        pass
 
     if header_md:
         if thumbnail_url:
@@ -116,7 +135,8 @@ def embed_to_container(
             container.add_item(ui.TextDisplay(_truncate(header_md)))
 
     # ── Fields ──
-    if embed.fields:
+    fields = getattr(embed, "fields", None)
+    if fields:
         if header_md:
             container.add_item(ui.Separator(spacing=discord.SeparatorSpacing.small))
 
@@ -246,7 +266,8 @@ def embeds_to_layout(
 def view_items_to_action_rows(view: ui.View) -> List[ui.ActionRow]:
     """Extract action rows from a regular View for re-use in LayoutView."""
     rows: List[ui.ActionRow] = []
-    for child in view.children:
+    # Use list() to avoid issues if view.children is modified during iteration
+    for child in list(view.children):
         if isinstance(child, ui.ActionRow):
             rows.append(child)
         elif isinstance(child, (ui.Button, ui.Select)):

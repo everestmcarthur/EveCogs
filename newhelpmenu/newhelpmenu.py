@@ -100,17 +100,30 @@ class NewHelpMenu(commands.Cog):
         self._active_views: Dict[int, ui.LayoutView] = {}  # msg_id -> view
         self._patched = False
 
+        # Guild settings cache with TTL (guild_id -> (settings, timestamp))
+        self._settings_cache: Dict[int, Tuple[Dict, float]] = {}
+        self._cache_ttl = 60.0  # Cache for 60 seconds
+
+    async def cog_load(self) -> None:
+        """Called when cog is loaded — set up monkey patches."""
+        await self._apply_patches()
+
     async def initialize(self):
-        """Called after cog is added — set up monkey patches."""
+        """Called after cog is added — set up monkey patches (legacy support)."""
         await self._apply_patches()
 
     async def cog_unload(self):
         """Restore everything on unload."""
         await self._remove_patches()
-        # Stop all active views
-        for view in self._active_views.values():
-            view.stop()
+        # Stop all active views and clean up
+        for msg_id, view in list(self._active_views.items()):
+            try:
+                view.stop()
+            except Exception as e:
+                log.warning(f"Failed to stop view {msg_id}: {e}")
         self._active_views.clear()
+        # Clear settings cache
+        self._settings_cache.clear()
         # Restore Red's original help command
         if self._original_help_command is not None:
             self.bot.add_command(self._original_help_command)
@@ -119,6 +132,21 @@ class NewHelpMenu(commands.Cog):
     # ═══════════════════════════════════════════════════════════════
     #  MONKEY PATCHING
     # ═══════════════════════════════════════════════════════════════
+
+    async def _get_cached_settings(self, guild: discord.Guild) -> Dict[str, Any]:
+        """Get guild settings with caching to reduce database load."""
+        import time
+        now = time.time()
+
+        if guild.id in self._settings_cache:
+            settings, timestamp = self._settings_cache[guild.id]
+            if now - timestamp < self._cache_ttl:
+                return settings
+
+        # Cache miss or expired - fetch from database
+        settings = await self.config.guild(guild).all()
+        self._settings_cache[guild.id] = (settings, now)
+        return settings
 
     async def _apply_patches(self):
         """Monkey-patch Context.send AND channel.send to intercept embeds globally."""
@@ -129,31 +157,31 @@ class NewHelpMenu(commands.Cog):
         original_channel_send = discord.abc.Messageable.send
 
         cog_ref = self  # closure reference
-        _converting = set()  # recursion guard (task ids)
+        from contextvars import ContextVar
+        _converting: ContextVar[bool] = ContextVar("newhelpmenu_converting", default=False)
 
         async def _convert_and_send(original_fn, self_obj, content, kwargs):
             """Shared logic: convert embeds → CV2, call the original fn."""
             # Recursion guard: Context.send calls super().send (Messageable.send)
-            # which we also patch. Use asyncio task id to detect re-entry.
-            task = id(asyncio.current_task())
-            if task in _converting:
+            # which we also patch. Use contextvar for thread-safe recursion detection.
+            if _converting.get():
                 return await original_fn(self_obj, content, **kwargs)
-            _converting.add(task)
+            _converting.set(True)
             try:
                 # Resolve the guild from whatever object we're sending to
-                guild = None
-                if isinstance(self_obj, commands.Context):
-                    guild = self_obj.guild
-                elif isinstance(self_obj, (discord.TextChannel, discord.VoiceChannel,
-                                           discord.StageChannel, discord.Thread)):
-                    guild = self_obj.guild
-                elif isinstance(self_obj, discord.Member):
+                guild = getattr(self_obj, 'guild', None)
+                if guild is None and isinstance(self_obj, commands.Context):
                     guild = self_obj.guild
 
                 if guild is None:
                     return await original_fn(self_obj, content, **kwargs)
 
-                settings = await cog_ref.config.guild(guild).all()
+                # Use cached settings to reduce database load
+                try:
+                    settings = await cog_ref._get_cached_settings(guild)
+                except Exception as e:
+                    log.warning(f"Failed to get cached settings for guild {guild.id}: {e}")
+                    return await original_fn(self_obj, content, **kwargs)
 
                 if not settings["enabled"] or not settings["embed_override"]:
                     return await original_fn(self_obj, content, **kwargs)
@@ -215,17 +243,23 @@ class NewHelpMenu(commands.Cog):
                 kwargs.pop("embeds", None)
                 msg = await original_fn(self_obj, None, **kwargs)
 
-                # Track for cleanup
+                # Track for cleanup with automatic removal on stop
                 if msg:
                     cog_ref._active_views[msg.id] = layout
+                    # Add cleanup callback
+                    original_stop = layout.stop
+                    def cleanup_stop():
+                        original_stop()
+                        cog_ref._active_views.pop(msg.id, None)
+                    layout.stop = cleanup_stop
 
                 return msg
 
             except Exception as e:
-                log.warning(f"CV2 conversion failed, falling back to original: {e}")
+                log.warning(f"CV2 conversion failed, falling back to original: {e}", exc_info=True)
                 return await original_fn(self_obj, content, **kwargs)
             finally:
-                _converting.discard(task)
+                _converting.set(False)
 
         async def patched_ctx_send(ctx_self, content=None, **kwargs):
             """Wrapper around Context.send."""
@@ -411,18 +445,33 @@ class NewHelpMenu(commands.Cog):
             return
 
         custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
-        if not custom_id.startswith(("help_", "cv2menu_")):
-            return
+        # Use unique namespace prefix to avoid collisions with other cogs
+        if not custom_id.startswith(("nhm_help_", "nhm_cv2menu_")):
+            # Legacy support for old IDs
+            if not custom_id.startswith(("help_", "cv2menu_")):
+                return
 
         msg_id = interaction.message.id if interaction.message else None
         if msg_id and msg_id in self._active_views:
             view = self._active_views[msg_id]
             if hasattr(view, "handle_interaction"):
-                await view.handle_interaction(interaction)
+                try:
+                    await view.handle_interaction(interaction)
+                except Exception as e:
+                    log.error(f"Failed to handle interaction {custom_id}: {e}", exc_info=True)
+                    try:
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message(
+                                "⚠️ An error occurred processing your interaction.",
+                                ephemeral=True
+                            )
+                    except Exception:
+                        pass
                 return
 
         try:
-            await interaction.response.defer()
+            if not interaction.response.is_done():
+                await interaction.response.defer()
         except Exception:
             pass
 

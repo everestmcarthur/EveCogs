@@ -1,14 +1,17 @@
 {
     "author": ["everestmcarthur"],
-    "description": "The ultimate Discord event logging system. Captures every single Discord event with individual toggles, advanced filtering, customizable formats (detailed/compact/JSON), and comprehensive tracking of all Discord gateway events.",
-    "install_msg": "Thanks for installing RubyLogging! Use `[p]rlog quickstart #channel` to get started, or `[p]rlog list` to see all 100+ available events.",
-    "short": "Ultimate event logger - every Discord event, individually toggleable",
+    "description": "The ultimate Discord event logging system. Captures every single Discord event with individual toggles, advanced filtering, customizable formats (detailed/compact/JSON), comprehensive tracking of all Discord gateway events, and intelligent attachment/media logging with image/GIF/video previews and deleted attachment recovery.",
+    "install_msg": "Thanks for installing RubyLogging! Use `[p]rlog quickstart #channel` to get started with attachment logging enabled, or `[p]rlog list` to see all 100+ available events. Media logging automatically tracks and previews images, GIFs, videos, and stickers - even after deletion!",
+    "short": "Ultimate event logger - every Discord event, individually toggleable, with intelligent media tracking",
     "min_bot_version": "3.5.0",
     "tags": [
         "logging",
         "events",
         "audit",
         "moderation",
-        "tracking"
+        "tracking",
+        "attachments",
+        "media",
+        "images"
     ]
 }
