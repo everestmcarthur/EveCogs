@@ -598,46 +598,74 @@ class RubyLogging(commands.Cog):
         args: List[Any],
         kwargs: Dict[str, Any],
     ) -> discord.Embed:
-        """Format event data into an embed."""
+        """Format event data into a beautiful, detailed embed."""
         config = self.config.guild(guild)
         format_type = await config.format()
         color_coded = await config.color_coded()
         include_timestamp = await config.include_timestamp()
 
-        # Color mapping by category
+        # Enhanced color mapping with specific event colors
         colors = {
-            "connection": discord.Color.blue(),
-            "gateway": discord.Color.dark_grey(),
-            "guilds": discord.Color.purple(),
-            "channels": discord.Color.green(),
-            "members": discord.Color.orange(),
-            "messages": discord.Color.gold(),
-            "voice": discord.Color.blurple(),
-            "stage": discord.Color.magenta(),
-            "threads": discord.Color.teal(),
-            "interactions": discord.Color.brand_red(),
-            "integrations": discord.Color.dark_gold(),
-            "invites": discord.Color.light_grey(),
-            "typing": discord.Color.lighter_grey(),
-            "automod": discord.Color.red(),
-            "scheduled_events": discord.Color.dark_purple(),
-            "app_commands": discord.Color.brand_green(),
-            "entitlements": discord.Color.yellow(),
-            "audit_log": discord.Color.dark_red(),
+            "connection": discord.Color.from_rgb(88, 101, 242),  # Blurple
+            "gateway": discord.Color.from_rgb(153, 170, 181),  # Grey
+            "guilds": discord.Color.from_rgb(138, 43, 226),  # Purple
+            "channels": discord.Color.from_rgb(87, 242, 135),  # Green
+            "members": discord.Color.from_rgb(255, 165, 0),  # Orange
+            "messages": discord.Color.from_rgb(255, 215, 0),  # Gold
+            "voice": discord.Color.from_rgb(114, 137, 218),  # Light blurple
+            "stage": discord.Color.from_rgb(255, 115, 250),  # Magenta
+            "threads": discord.Color.from_rgb(32, 178, 170),  # Teal
+            "interactions": discord.Color.from_rgb(237, 66, 69),  # Brand red
+            "integrations": discord.Color.from_rgb(218, 165, 32),  # Dark gold
+            "invites": discord.Color.from_rgb(211, 211, 211),  # Light grey
+            "typing": discord.Color.from_rgb(192, 192, 192),  # Silver
+            "automod": discord.Color.from_rgb(255, 0, 0),  # Pure red
+            "scheduled_events": discord.Color.from_rgb(75, 0, 130),  # Indigo
+            "app_commands": discord.Color.from_rgb(87, 242, 135),  # Brand green
+            "entitlements": discord.Color.from_rgb(255, 223, 0),  # Yellow
+            "audit_log": discord.Color.from_rgb(139, 0, 0),  # Dark red
         }
 
         color = colors.get(category, discord.Color.greyple()) if color_coded else discord.Color.greyple()
 
+        # Enhanced title with category emoji
+        category_emojis = {
+            "connection": "🔌",
+            "gateway": "📡",
+            "guilds": "🏰",
+            "channels": "💬",
+            "members": "👥",
+            "messages": "📨",
+            "voice": "🔊",
+            "stage": "🎙️",
+            "threads": "🧵",
+            "interactions": "⚡",
+            "integrations": "🔗",
+            "invites": "📨",
+            "typing": "⌨️",
+            "automod": "🛡️",
+            "scheduled_events": "📅",
+            "app_commands": "⚙️",
+            "entitlements": "💎",
+            "audit_log": "📜",
+        }
+
+        emoji = category_emojis.get(category, "📋")
+        title = f"{emoji} {event_name.replace('_', ' ').title()}"
+
         embed = discord.Embed(
-            title=f"📋 {event_name.replace('_', ' ').title()}",
+            title=title,
             color=color,
         )
 
         if include_timestamp:
             embed.timestamp = datetime.now(timezone.utc)
 
-        embed.add_field(name="Category", value=category.title(), inline=True)
-        embed.add_field(name="Event", value=f"`on_{event_name}`", inline=True)
+        # Add category badge in footer
+        embed.set_footer(
+            text=f"{category.upper()} • on_{event_name}",
+            icon_url=guild.icon.url if guild.icon else None
+        )
 
         # Format event data based on format type
         if format_type == "detailed":
@@ -652,20 +680,134 @@ class RubyLogging(commands.Cog):
     async def _add_detailed_fields(
         self, embed: discord.Embed, event_name: str, args: List[Any], kwargs: Dict[str, Any]
     ) -> None:
-        """Add detailed field information to embed."""
-        # Parse arguments into readable format
-        for i, arg in enumerate(args):
-            name = f"Argument {i + 1}"
-            value = await self._format_object(arg)
-            if len(value) > 1024:
-                value = value[:1021] + "..."
-            embed.add_field(name=name, value=value, inline=False)
+        """Add detailed field information to embed with before/after comparisons."""
+        # Special handling for update events (before, after pattern)
+        if "_update" in event_name and len(args) == 2:
+            before, after = args[0], args[1]
 
-        for key, value in kwargs.items():
-            formatted = await self._format_object(value)
-            if len(formatted) > 1024:
-                formatted = formatted[:1021] + "..."
-            embed.add_field(name=key.title(), value=formatted, inline=False)
+            # Add before state
+            before_str = await self._format_object(before)
+            if len(before_str) > 1024:
+                before_str = before_str[:1021] + "..."
+            embed.add_field(name="📤 Before", value=before_str, inline=False)
+
+            # Add after state
+            after_str = await self._format_object(after)
+            if len(after_str) > 1024:
+                after_str = after_str[:1021] + "..."
+            embed.add_field(name="📥 After", value=after_str, inline=False)
+
+            # Add a changes summary for member/guild/role updates
+            changes = await self._detect_changes(before, after)
+            if changes:
+                changes_str = "\n".join(f"• {change}" for change in changes)
+                if len(changes_str) > 1024:
+                    changes_str = changes_str[:1021] + "..."
+                embed.add_field(name="🔄 Changes Detected", value=changes_str, inline=False)
+
+        else:
+            # Standard argument parsing
+            for i, arg in enumerate(args):
+                name = f"Argument {i + 1}"
+                value = await self._format_object(arg)
+                if len(value) > 1024:
+                    value = value[:1021] + "..."
+                embed.add_field(name=name, value=value, inline=False)
+
+            for key, value in kwargs.items():
+                formatted = await self._format_object(value)
+                if len(formatted) > 1024:
+                    formatted = formatted[:1021] + "..."
+                embed.add_field(name=key.title(), value=formatted, inline=False)
+
+    async def _detect_changes(self, before: Any, after: Any) -> List[str]:
+        """Detect specific changes between before and after objects."""
+        changes = []
+
+        if isinstance(before, discord.Member) and isinstance(after, discord.Member):
+            if before.nick != after.nick:
+                changes.append(f"**Nickname:** `{before.nick or 'None'}` → `{after.nick or 'None'}`")
+            if before.roles != after.roles:
+                added = set(after.roles) - set(before.roles)
+                removed = set(before.roles) - set(after.roles)
+                if added:
+                    changes.append(f"**Roles Added:** {', '.join(r.mention for r in added)}")
+                if removed:
+                    changes.append(f"**Roles Removed:** {', '.join(r.mention for r in removed)}")
+            if before.status != after.status:
+                changes.append(f"**Status:** {before.status.name} → {after.status.name}")
+            if hasattr(before, 'timed_out_until') and before.timed_out_until != after.timed_out_until:
+                if after.timed_out_until:
+                    until = f"<t:{int(after.timed_out_until.timestamp())}:R>"
+                    changes.append(f"**Timeout:** Set until {until}")
+                else:
+                    changes.append("**Timeout:** Removed")
+
+        elif isinstance(before, discord.User) and isinstance(after, discord.User):
+            if before.name != after.name:
+                changes.append(f"**Username:** `{before.name}` → `{after.name}`")
+            if before.discriminator != after.discriminator:
+                changes.append(f"**Discriminator:** `{before.discriminator}` → `{after.discriminator}`")
+            if before.avatar != after.avatar:
+                changes.append("**Avatar:** Changed")
+
+        elif isinstance(before, discord.Guild) and isinstance(after, discord.Guild):
+            if before.name != after.name:
+                changes.append(f"**Name:** `{before.name}` → `{after.name}`")
+            if before.icon != after.icon:
+                changes.append("**Icon:** Changed")
+            if before.owner_id != after.owner_id:
+                changes.append(f"**Owner:** <@{before.owner_id}> → <@{after.owner_id}>")
+            if before.premium_tier != after.premium_tier:
+                changes.append(f"**Boost Level:** {before.premium_tier} → {after.premium_tier}")
+            if before.verification_level != after.verification_level:
+                changes.append(f"**Verification:** {before.verification_level.name} → {after.verification_level.name}")
+
+        elif isinstance(before, discord.Role) and isinstance(after, discord.Role):
+            if before.name != after.name:
+                changes.append(f"**Name:** `{before.name}` → `{after.name}`")
+            if before.color != after.color:
+                changes.append(f"**Color:** {before.color} → {after.color}")
+            if before.hoist != after.hoist:
+                changes.append(f"**Hoisted:** {before.hoist} → {after.hoist}")
+            if before.mentionable != after.mentionable:
+                changes.append(f"**Mentionable:** {before.mentionable} → {after.mentionable}")
+            if before.permissions != after.permissions:
+                changes.append("**Permissions:** Modified")
+
+        elif isinstance(before, (discord.TextChannel, discord.VoiceChannel)) and isinstance(after, (discord.TextChannel, discord.VoiceChannel)):
+            if before.name != after.name:
+                changes.append(f"**Name:** `{before.name}` → `{after.name}`")
+            if before.category != after.category:
+                before_cat = before.category.name if before.category else "None"
+                after_cat = after.category.name if after.category else "None"
+                changes.append(f"**Category:** {before_cat} → {after_cat}")
+            if isinstance(before, discord.TextChannel) and isinstance(after, discord.TextChannel):
+                if before.slowmode_delay != after.slowmode_delay:
+                    changes.append(f"**Slowmode:** {before.slowmode_delay}s → {after.slowmode_delay}s")
+                if before.nsfw != after.nsfw:
+                    changes.append(f"**NSFW:** {before.nsfw} → {after.nsfw}")
+            if isinstance(before, discord.VoiceChannel) and isinstance(after, discord.VoiceChannel):
+                if before.user_limit != after.user_limit:
+                    before_limit = before.user_limit or "Unlimited"
+                    after_limit = after.user_limit or "Unlimited"
+                    changes.append(f"**User Limit:** {before_limit} → {after_limit}")
+                if before.bitrate != after.bitrate:
+                    changes.append(f"**Bitrate:** {before.bitrate//1000}kbps → {after.bitrate//1000}kbps")
+
+        elif isinstance(before, discord.Message) and isinstance(after, discord.Message):
+            if before.content != after.content:
+                old_content = before.content[:50] + "..." if len(before.content) > 50 else before.content
+                new_content = after.content[:50] + "..." if len(after.content) > 50 else after.content
+                changes.append(f"**Content Changed**")
+                changes.append(f"Old: {old_content}")
+                changes.append(f"New: {new_content}")
+            if before.pinned != after.pinned:
+                changes.append(f"**Pinned:** {before.pinned} → {after.pinned}")
+            if len(before.embeds) != len(after.embeds):
+                changes.append(f"**Embeds:** {len(before.embeds)} → {len(after.embeds)}")
+
+        return changes
 
     async def _add_compact_fields(
         self, embed: discord.Embed, event_name: str, args: List[Any], kwargs: Dict[str, Any]
@@ -699,34 +841,125 @@ class RubyLogging(commands.Cog):
         embed.description = f"```json\n{json_str}\n```"
 
     async def _format_object(self, obj: Any) -> str:
-        """Format an object into a readable string."""
+        """Format an object into a beautiful, detailed string."""
         if isinstance(obj, discord.User):
-            return f"**User:** {obj.mention} (`{obj.id}`)\n**Name:** {obj.name}\n**Bot:** {obj.bot}"
+            created = f"<t:{int(obj.created_at.timestamp())}:R>" if obj.created_at else "Unknown"
+            bot_badge = "🤖" if obj.bot else "👤"
+            return (
+                f"{bot_badge} **User:** {obj.mention} (`{obj.id}`)\n"
+                f"**Username:** {obj.name}\n"
+                f"**Display Name:** {obj.display_name}\n"
+                f"**Bot:** {'Yes' if obj.bot else 'No'}\n"
+                f"**Created:** {created}"
+            )
         elif isinstance(obj, discord.Member):
-            roles = ", ".join(r.mention for r in obj.roles[1:]) or "None"
+            roles = ", ".join(r.mention for r in obj.roles[1:4]) or "None"
+            if len(obj.roles) > 4:
+                roles += f" *+{len(obj.roles) - 4} more*"
+
+            joined = f"<t:{int(obj.joined_at.timestamp())}:R>" if obj.joined_at else "Unknown"
+            created = f"<t:{int(obj.created_at.timestamp())}:R>" if obj.created_at else "Unknown"
+
+            status_emoji = {
+                discord.Status.online: "🟢",
+                discord.Status.idle: "🟡",
+                discord.Status.dnd: "🔴",
+                discord.Status.offline: "⚫",
+            }
+
             return (
                 f"**Member:** {obj.mention} (`{obj.id}`)\n"
-                f"**Name:** {obj.name}\n"
-                f"**Nickname:** {obj.nick or 'None'}\n"
-                f"**Roles:** {roles}\n"
-                f"**Joined:** {obj.joined_at.strftime('%Y-%m-%d %H:%M') if obj.joined_at else 'Unknown'}"
+                f"**Display Name:** {obj.display_name}\n"
+                f"**Username:** {obj.name}\n"
+                f"**Nickname:** {obj.nick or '*None*'}\n"
+                f"**Status:** {status_emoji.get(obj.status, '⚫')} {obj.status.name.title()}\n"
+                f"**Roles ({len(obj.roles) - 1}):** {roles}\n"
+                f"**Joined Server:** {joined}\n"
+                f"**Account Created:** {created}\n"
+                f"**Top Role:** {obj.top_role.mention if obj.top_role.name != '@everyone' else '*None*'}"
             )
         elif isinstance(obj, discord.Guild):
+            created = f"<t:{int(obj.created_at.timestamp())}:D>" if obj.created_at else "Unknown"
+            features = ", ".join(f"`{f}`" for f in list(obj.features)[:5]) if obj.features else "*None*"
+            if len(obj.features) > 5:
+                features += f" *+{len(obj.features) - 5} more*"
+
+            boost_level = f"{'⭐' * obj.premium_tier} Level {obj.premium_tier}" if obj.premium_tier else "No boosts"
+
             return (
-                f"**Guild:** {obj.name} (`{obj.id}`)\n"
+                f"🏰 **Guild:** {obj.name} (`{obj.id}`)\n"
                 f"**Owner:** <@{obj.owner_id}>\n"
-                f"**Members:** {obj.member_count}"
+                f"**Members:** {obj.member_count:,} total\n"
+                f"**Channels:** {len(obj.channels)} ({len(obj.text_channels)} text, {len(obj.voice_channels)} voice)\n"
+                f"**Roles:** {len(obj.roles)}\n"
+                f"**Boost Status:** {boost_level} ({obj.premium_subscription_count or 0} boosts)\n"
+                f"**Created:** {created}\n"
+                f"**Features:** {features}"
             )
         elif isinstance(obj, discord.TextChannel):
-            return f"**Channel:** {obj.mention} (`{obj.id}`)\n**Category:** {obj.category or 'None'}"
-        elif isinstance(obj, discord.VoiceChannel):
-            return f"**Voice Channel:** {obj.name} (`{obj.id}`)\n**User Limit:** {obj.user_limit or 'Unlimited'}"
-        elif isinstance(obj, discord.Role):
-            return f"**Role:** {obj.mention} (`{obj.id}`)\n**Color:** {obj.color}\n**Position:** {obj.position}"
-        elif isinstance(obj, discord.Message):
-            content = obj.content[:100] + "..." if len(obj.content) > 100 else obj.content or "*No text content*"
+            perms_msg = "🔒 Private" if obj.overwrites else "🌐 Public"
+            slowmode = f"{obj.slowmode_delay}s" if obj.slowmode_delay else "None"
+            created = f"<t:{int(obj.created_at.timestamp())}:R>" if obj.created_at else "Unknown"
 
-            # Add attachment info
+            return (
+                f"💬 **Channel:** {obj.mention} (`{obj.id}`)\n"
+                f"**Name:** #{obj.name}\n"
+                f"**Category:** {obj.category.name if obj.category else '*None*'}\n"
+                f"**Privacy:** {perms_msg}\n"
+                f"**Slowmode:** {slowmode}\n"
+                f"**Position:** {obj.position}\n"
+                f"**NSFW:** {'Yes ⚠️' if obj.nsfw else 'No'}\n"
+                f"**Created:** {created}"
+            )
+        elif isinstance(obj, discord.VoiceChannel):
+            limit = f"{obj.user_limit}" if obj.user_limit else "Unlimited ∞"
+            bitrate = f"{obj.bitrate // 1000}kbps"
+            created = f"<t:{int(obj.created_at.timestamp())}:R>" if obj.created_at else "Unknown"
+
+            return (
+                f"🔊 **Voice Channel:** {obj.name} (`{obj.id}`)\n"
+                f"**Category:** {obj.category.name if obj.category else '*None*'}\n"
+                f"**User Limit:** {limit}\n"
+                f"**Bitrate:** {bitrate}\n"
+                f"**Position:** {obj.position}\n"
+                f"**Region:** {obj.rtc_region or 'Automatic'}\n"
+                f"**Created:** {created}"
+            )
+        elif isinstance(obj, discord.Role):
+            created = f"<t:{int(obj.created_at.timestamp())}:R>" if obj.created_at else "Unknown"
+            perms = obj.permissions
+            perm_list = []
+            if perms.administrator:
+                perm_list.append("Administrator 👑")
+            if perms.manage_guild:
+                perm_list.append("Manage Server")
+            if perms.manage_roles:
+                perm_list.append("Manage Roles")
+            if perms.manage_channels:
+                perm_list.append("Manage Channels")
+
+            key_perms = ", ".join(perm_list[:3]) if perm_list else "*No special permissions*"
+            if len(perm_list) > 3:
+                key_perms += f" *+{len(perm_list) - 3} more*"
+
+            return (
+                f"**Role:** {obj.mention} (`{obj.id}`)\n"
+                f"**Name:** {obj.name}\n"
+                f"**Color:** {obj.color} (`#{obj.color.value:06X}`)\n"
+                f"**Position:** {obj.position}\n"
+                f"**Hoisted:** {'Yes 📌' if obj.hoist else 'No'}\n"
+                f"**Mentionable:** {'Yes @' if obj.mentionable else 'No'}\n"
+                f"**Members:** {len(obj.members)}\n"
+                f"**Key Permissions:** {key_perms}\n"
+                f"**Created:** {created}"
+            )
+        elif isinstance(obj, discord.Message):
+            content = obj.content[:150] + "..." if len(obj.content) > 150 else obj.content or "*No text content*"
+
+            # Format timestamp
+            created = f"<t:{int(obj.created_at.timestamp())}:f>"
+
+            # Add attachment info with icons
             attachment_info = ""
             if obj.attachments:
                 att_types = []
@@ -739,21 +972,38 @@ class RubyLogging(commands.Cog):
                                 att_types.append("🖼️ Image")
                         elif att.content_type.startswith("video/"):
                             att_types.append("🎬 Video")
+                        elif att.content_type.startswith("audio/"):
+                            att_types.append("🎵 Audio")
                         else:
                             att_types.append("📎 File")
                     else:
                         att_types.append("📎 File")
-                attachment_info = f"\n**Attachments:** {', '.join(att_types)} ({len(obj.attachments)} total)"
+                attachment_info = f"\n**Attachments ({len(obj.attachments)}):** {', '.join(att_types)}"
 
             if obj.stickers:
                 sticker_names = ", ".join(s.name for s in obj.stickers)
                 attachment_info += f"\n**Stickers:** {sticker_names}"
 
+            # Add embeds/reactions
+            extras = []
+            if obj.embeds:
+                extras.append(f"{len(obj.embeds)} embed(s)")
+            if obj.reactions:
+                extras.append(f"{len(obj.reactions)} reaction(s)")
+            if obj.mentions:
+                extras.append(f"{len(obj.mentions)} mention(s)")
+            if obj.reference:
+                extras.append("Reply")
+
+            extras_str = f"\n**Extras:** {', '.join(extras)}" if extras else ""
+
             return (
-                f"**Author:** {obj.author.mention}\n"
+                f"📨 **Author:** {obj.author.mention} ({obj.author.name})\n"
                 f"**Channel:** {obj.channel.mention if hasattr(obj.channel, 'mention') else obj.channel}\n"
-                f"**Content:** {content}{attachment_info}\n"
-                f"**ID:** `{obj.id}`"
+                f"**Sent:** {created}\n"
+                f"**Content:** {content}{attachment_info}{extras_str}\n"
+                f"**Message ID:** `{obj.id}`\n"
+                f"**[Jump to Message]({obj.jump_url})**"
             )
         elif isinstance(obj, discord.Emoji):
             return f"**Emoji:** {obj} (`{obj.id}`)\n**Name:** {obj.name}\n**Animated:** {obj.animated}"
