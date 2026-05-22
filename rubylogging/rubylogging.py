@@ -173,6 +173,7 @@ class RubyLogging(commands.Cog):
             "show_attachment_previews": True,
             "track_deleted_attachments": True,
             "max_preview_attachments": 4,
+            "reupload_attachments": True,  # Re-upload images to preserve them
         }
 
         self.config.register_guild(**default_guild)
@@ -247,17 +248,23 @@ class RubyLogging(commands.Cog):
         # Build attachment data
         attachment_data = []
         for att in message.attachments:
+            # For images/GIFs, store both URL and proxy URL
+            # Proxy URLs tend to last longer after deletion
+            is_image = att.content_type.startswith("image/") if att.content_type else att.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp'))
+            is_gif = att.content_type == "image/gif" if att.content_type else att.filename.lower().endswith(".gif")
+
             attachment_data.append({
                 "filename": att.filename,
                 "url": att.url,
-                "proxy_url": att.proxy_url,
+                "proxy_url": att.proxy_url,  # This persists longer!
                 "size": att.size,
                 "content_type": att.content_type,
-                "is_image": att.content_type.startswith("image/") if att.content_type else False,
+                "is_image": is_image,
                 "is_video": att.content_type.startswith("video/") if att.content_type else False,
-                "is_gif": att.content_type == "image/gif" if att.content_type else att.filename.lower().endswith(".gif"),
+                "is_gif": is_gif,
                 "width": att.width,
                 "height": att.height,
+                "ephemeral": att.ephemeral if hasattr(att, 'ephemeral') else False,
             })
 
         # Add stickers
@@ -295,12 +302,20 @@ class RubyLogging(commands.Cog):
         # Check if there are cached attachments
         cached = self._attachment_cache.pop(message.id, None)
 
-        # Process the normal message_delete event
+        # If we have cached attachments, pass them through in the event data
+        # so the preview can be shown in the main delete log
+        if cached:
+            # Add cached data to message object temporarily
+            message._cached_attachments = cached  # type: ignore
+
+        # Process the normal message_delete event (this will show the preview if cached)
         await self._process_event("message_delete", "messages", message)
 
-        # If message had cached attachments, log them separately
+        # Also log detailed attachment info if enabled
         if cached:
-            await self._log_deleted_attachments(message, cached)
+            config = self.config.guild(message.guild)
+            if await config.log_attachments():
+                await self._log_deleted_attachments(message, cached)
 
     async def _handle_bulk_delete_with_cache(self, messages: List[discord.Message]) -> None:
         """Handle bulk message deletion with cached attachments."""
@@ -353,6 +368,9 @@ class RubyLogging(commands.Cog):
         if await self._should_ignore(message.guild, [message], {}):
             return
 
+        # Check if we should re-upload attachments
+        reupload = await config.reupload_attachments()
+
         # Build embed
         accent = await config.accent_color()
         color_coded = await config.color_coded()
@@ -389,9 +407,11 @@ class RubyLogging(commands.Cog):
 
             if att["content_type"] == "sticker":
                 type_str = "Sticker"
+                # Use proxy URL for stickers
+                url = att.get('proxy_url') or att['url']
                 attachment_lines.append(
                     f"{type_emoji} **{att['sticker_name']}** (Sticker)\n"
-                    f"╰ [View]({att['url']})"
+                    f"╰ [View]({url})"
                 )
             else:
                 if att["is_gif"]:
@@ -408,14 +428,17 @@ class RubyLogging(commands.Cog):
                 if att["width"] and att["height"]:
                     dims = f" ({att['width']}x{att['height']})"
 
+                # Use proxy URL which persists longer
+                url = att.get('proxy_url') or att['url']
                 attachment_lines.append(
                     f"{type_emoji} **{att['filename']}** ({size_mb:.2f} MB)\n"
-                    f"╰ Type: {type_str}{dims} · [Download]({att['url']})"
+                    f"╰ Type: {type_str}{dims} · [View]({url})"
                 )
 
-            # Collect images for preview
+            # Collect images for preview - use proxy URL!
             if show_previews and att["is_image"] and len(images_for_preview) < max_previews:
-                images_for_preview.append(att["url"])
+                preview_url = att.get('proxy_url') or att['url']
+                images_for_preview.append(preview_url)
 
         embed.add_field(
             name=f"📋 Attachments ({len(attachments)})",
@@ -428,20 +451,47 @@ class RubyLogging(commands.Cog):
             embed.set_image(url=images_for_preview[0])
 
         try:
-            sent_msg = await channel.send(embed=embed)
+            # If reupload is enabled, download and re-upload images to preserve them
+            files_to_upload = []
+            if reupload and images_for_preview:
+                import aiohttp
+                import io
 
-            # Send additional previews if multiple images (as separate embeds)
-            if len(images_for_preview) > 1:
-                for i, preview_url in enumerate(images_for_preview[1:max_previews], 2):
-                    preview_embed = discord.Embed(
-                        description=f"**Attachment {i}/{min(len(images_for_preview), max_previews)}**",
-                        color=color
-                    )
-                    preview_embed.set_image(url=preview_url)
-                    await channel.send(embed=preview_embed)
+                async with aiohttp.ClientSession() as session:
+                    for i, url in enumerate(images_for_preview[:max_previews]):
+                        try:
+                            async with session.get(url) as resp:
+                                if resp.status == 200:
+                                    data = await resp.read()
+                                    # Get filename from attachment data
+                                    filename = attachments[i].get('filename', f'image_{i}.png')
+                                    file = discord.File(io.BytesIO(data), filename=filename)
+                                    files_to_upload.append(file)
+                        except Exception as e:
+                            LOG.warning(f"Failed to download attachment for re-upload: {e}")
+
+            # Send main embed with re-uploaded files
+            if files_to_upload:
+                # Send with files attached - they'll be preserved!
+                sent_msg = await channel.send(embed=embed, files=files_to_upload[:10])  # Discord limit
+            else:
+                # Fall back to URL embedding (will expire)
+                sent_msg = await channel.send(embed=embed)
+
+                # Send additional previews if multiple images (as separate embeds)
+                if len(images_for_preview) > 1:
+                    for i, preview_url in enumerate(images_for_preview[1:max_previews], 2):
+                        preview_embed = discord.Embed(
+                            description=f"**Attachment {i}/{min(len(images_for_preview), max_previews)}**",
+                            color=color
+                        )
+                        preview_embed.set_image(url=preview_url)
+                        await channel.send(embed=preview_embed)
 
         except discord.HTTPException as e:
             LOG.error(f"Failed to send deleted attachment log: {e}")
+        except Exception as e:
+            LOG.exception(f"Error processing deleted attachments: {e}")
 
     async def _log_bulk_deleted_attachments(
         self, guild: discord.Guild, deleted_data: List[Tuple[discord.Message, List[Dict[str, Any]]]]
@@ -689,10 +739,21 @@ class RubyLogging(commands.Cog):
         preview_url = None
         if args and isinstance(args[0], discord.Message):
             msg = args[0]
-            if msg.attachments:
+
+            # First check for cached attachments (for deleted messages)
+            if hasattr(msg, '_cached_attachments'):
+                cached = msg._cached_attachments
+                for att_data in cached:
+                    if att_data.get('is_image'):
+                        # Use proxy URL which lasts longer
+                        preview_url = att_data.get('proxy_url') or att_data.get('url')
+                        break
+            # Otherwise check current attachments
+            elif msg.attachments:
                 for att in msg.attachments:
                     if att.content_type and att.content_type.startswith("image/"):
-                        preview_url = att.url
+                        # Use proxy URL for better persistence
+                        preview_url = att.proxy_url or att.url
                         break
 
         if preview_url:
@@ -1392,12 +1453,14 @@ class RubyLogging(commands.Cog):
         )
 
         # Attachment settings
+        reupload = await config.reupload_attachments()
         attachment_status = (
             f"{'✅' if log_attachments else '❌'} Logging\n"
             f"{'✅' if log_stickers else '❌'} Stickers\n"
             f"{'✅' if show_previews else '❌'} Previews\n"
             f"{'✅' if track_deleted else '❌'} Track Deleted\n"
-            f"📊 Max Previews: {max_previews}\n"
+            f"{'✅' if reupload else '❌'} Re-upload\n"
+            f"📊 Max: {max_previews}\n"
             f"💾 Cached: {len(self._attachment_cache)}"
         )
         embed.add_field(
@@ -1474,6 +1537,7 @@ class RubyLogging(commands.Cog):
             show_previews = await config.show_attachment_previews()
             track_deleted = await config.track_deleted_attachments()
             max_previews = await config.max_preview_attachments()
+            reupload = await config.reupload_attachments()
 
             status = (
                 f"**📎 Attachment Logging**\n"
@@ -1481,6 +1545,7 @@ class RubyLogging(commands.Cog):
                 f"{'✅' if log_stickers else '❌'} Log Stickers: {'On' if log_stickers else 'Off'}\n"
                 f"{'✅' if show_previews else '❌'} Show Previews: {'On' if show_previews else 'Off'}\n"
                 f"{'✅' if track_deleted else '❌'} Track Deleted: {'On' if track_deleted else 'Off'}\n"
+                f"{'✅' if reupload else '❌'} Re-upload: {'On' if reupload else 'Off'}\n"
                 f"📊 Max Previews: {max_previews}\n\n"
                 f"**Cache Status:** {len(self._attachment_cache)} messages cached"
             )
@@ -1548,6 +1613,32 @@ class RubyLogging(commands.Cog):
         count = max(1, min(10, count))
         await self.config.guild(ctx.guild).max_preview_attachments.set(count)
         await ctx.send(f"✅ Max attachment previews set to **{count}**")
+
+    @rlog_attachments.command(name="reupload")
+    async def rlog_attach_reupload(self, ctx: commands.Context) -> None:
+        """Toggle re-uploading attachments to preserve them after deletion.
+
+        When enabled, deleted images/GIFs are downloaded and re-uploaded to the
+        log channel so they remain visible forever (not just proxy URLs that expire).
+
+        **Note:** Uses bandwidth and storage. Attachments become permanent in log channel.
+        """
+        current = await self.config.guild(ctx.guild).reupload_attachments()
+        new_val = not current
+        await self.config.guild(ctx.guild).reupload_attachments.set(new_val)
+        status = "enabled" if new_val else "disabled"
+
+        if new_val:
+            await ctx.send(
+                f"✅ Attachment re-upload **{status}**\n"
+                f"Deleted images/GIFs will be downloaded and re-uploaded to preserve them permanently.\n"
+                f"⚠️ **Note:** This uses bandwidth and the files become permanent in the log channel."
+            )
+        else:
+            await ctx.send(
+                f"✅ Attachment re-upload **{status}**\n"
+                f"Deleted attachments will only show proxy URLs (which may expire)."
+            )
 
     @rlog_attachments.command(name="clearcache")
     @commands.admin_or_permissions(manage_guild=True)
