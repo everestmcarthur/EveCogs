@@ -1,0 +1,14 @@
+{
+    "author": ["everestmcarthur"],
+    "description": "The ultimate Discord event logging system. Captures every single Discord event with individual toggles, advanced filtering, customizable formats (detailed/compact/JSON), and comprehensive tracking of all Discord gateway events.",
+    "install_msg": "Thanks for installing RubyLogging! Use `[p]rlog quickstart #channel` to get started, or `[p]rlog list` to see all 100+ available events.",
+    "short": "Ultimate event logger - every Discord event, individually toggleable",
+    "min_bot_version": "3.5.0",
+    "tags": [
+        "logging",
+        "events",
+        "audit",
+        "moderation",
+        "tracking"
+    ]
+}
