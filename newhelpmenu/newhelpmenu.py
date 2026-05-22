@@ -95,7 +95,7 @@ class NewHelpMenu(commands.Cog):
 
         # Store original methods for restoration
         self._original_send: Optional[Callable] = None
-        self._original_help_command: Optional[commands.Command] = None
+        self._original_send_help_for: Optional[Callable] = None
         self._original_channel_send: Optional[Callable] = None
         self._active_views: Dict[int, ui.LayoutView] = {}  # msg_id -> view
         self._patched = False
@@ -105,12 +105,53 @@ class NewHelpMenu(commands.Cog):
         self._cache_ttl = 60.0  # Cache for 60 seconds
 
     async def cog_load(self) -> None:
-        """Called when cog is loaded — set up monkey patches."""
+        """Called when cog is loaded — set up monkey patches and replace help."""
         await self._apply_patches()
+        await self._replace_help_command()
 
     async def initialize(self):
         """Called after cog is added — set up monkey patches (legacy support)."""
         await self._apply_patches()
+        await self._replace_help_command()
+
+    async def _replace_help_command(self) -> None:
+        """Intercept Red's send_help_for method to use our CV2 help."""
+        # Store original send_help_for
+        self._original_send_help_for = self.bot.send_help_for
+
+        cog_ref = self
+
+        async def cv2_send_help_for(ctx, help_for, *, from_help_command=False):
+            """Wrapper that uses CV2 help when enabled, otherwise falls back to Red's."""
+            if not ctx.guild:
+                # No guild - use Red's default
+                return await cog_ref._original_send_help_for(ctx, help_for, from_help_command=from_help_command)
+
+            settings = await cog_ref.config.guild(ctx.guild).all()
+            if not settings.get("enabled") or not settings.get("help_override"):
+                # CV2 disabled - use Red's default
+                return await cog_ref._original_send_help_for(ctx, help_for, from_help_command=from_help_command)
+
+            # CV2 enabled - use our help system
+            try:
+                # Determine what to show help for
+                thing = None
+                if help_for is not None and help_for != cog_ref.bot:
+                    if hasattr(help_for, "qualified_name"):
+                        thing = help_for.qualified_name
+                    elif isinstance(help_for, str):
+                        thing = help_for
+                    else:
+                        thing = str(help_for)
+
+                await cog_ref._send_help(ctx, thing)
+            except Exception as e:
+                log.exception(f"CV2 help failed, falling back to Red's help: {e}")
+                return await cog_ref._original_send_help_for(ctx, help_for, from_help_command=from_help_command)
+
+        # Replace bot's send_help_for method
+        self.bot.send_help_for = cv2_send_help_for
+        log.info("NewHelpMenu: Hooked bot.send_help_for")
 
     async def cog_unload(self):
         """Restore everything on unload."""
@@ -124,10 +165,10 @@ class NewHelpMenu(commands.Cog):
         self._active_views.clear()
         # Clear settings cache
         self._settings_cache.clear()
-        # Restore Red's original help command
-        if self._original_help_command is not None:
-            self.bot.add_command(self._original_help_command)
-            log.info("NewHelpMenu: Restored original help command")
+        # Restore Red's original send_help_for method
+        if self._original_send_help_for is not None:
+            self.bot.send_help_for = self._original_send_help_for
+            log.info("NewHelpMenu: Restored original send_help_for")
 
     # ═══════════════════════════════════════════════════════════════
     #  MONKEY PATCHING
@@ -475,63 +516,6 @@ class NewHelpMenu(commands.Cog):
         except Exception:
             pass
 
-    # ═══════════════════════════════════════════════════════════════
-    #  HELP COMMAND — replaces Red's default (removed in __init__.py)
-    # ═══════════════════════════════════════════════════════════════
-
-    @commands.command(name="help")
-    async def _help_command(self, ctx: commands.Context, *, thing: str = None):
-        """Shows help for the bot, a command, a cog, or a category."""
-        if ctx.guild:
-            try:
-                await self._send_help(ctx, thing)
-                return
-            except Exception as e:
-                log.exception(f"Help menu failed, using text fallback: {e}")
-
-        # Fallback for DMs or on error — paginate to stay under 2000 chars
-        if thing is None:
-            prefix = ctx.clean_prefix
-            header = f"**{ctx.bot.user.display_name} — Help**\nUse `{prefix}help <command>` for details.\n"
-            chunks: List[str] = []
-            current = header
-            cog_names = sorted(ctx.bot.cogs.keys())
-            for cog_name in cog_names:
-                cog_obj = ctx.bot.get_cog(cog_name)
-                cmds = [c for c in cog_obj.get_commands() if not c.hidden]
-                if cmds:
-                    cmd_names = ", ".join(f"`{c.name}`" for c in sorted(cmds, key=lambda c: c.name))
-                    line = f"**{cog_name}** — {cmd_names}\n"
-                    if len(current) + len(line) > 1900:
-                        chunks.append(current)
-                        current = line
-                    else:
-                        current += line
-            if current:
-                chunks.append(current)
-            for chunk in chunks:
-                await ctx.send(chunk)
-        else:
-            cmd = ctx.bot.get_command(thing)
-            if cmd:
-                prefix = ctx.clean_prefix
-                sig = cmd.signature or ""
-                desc = cmd.help or cmd.short_doc or "No description."
-                text = f"**{prefix}{cmd.qualified_name}** {sig}\n\n{desc}"
-                if cmd.aliases:
-                    text += f"\n\n**Aliases:** {', '.join(cmd.aliases)}"
-                await ctx.send(text)
-            else:
-                cog_obj = ctx.bot.get_cog(thing)
-                if cog_obj:
-                    prefix = ctx.clean_prefix
-                    lines = [f"**{cog_obj.qualified_name}**\n{cog_obj.help or cog_obj.__doc__ or 'No description.'}\n"]
-                    for c in sorted(cog_obj.get_commands(), key=lambda c: c.name):
-                        if not c.hidden:
-                            lines.append(f"`{prefix}{c.qualified_name}` — {c.short_doc or 'No description'}")
-                    await ctx.send("\n".join(lines))
-                else:
-                    await ctx.send(f"No command or category named **{thing}** found.")
 
     # ═══════════════════════════════════════════════════════════════
     #  SETTINGS COMMANDS
