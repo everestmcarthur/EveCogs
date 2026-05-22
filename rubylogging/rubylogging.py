@@ -7,7 +7,7 @@ Tracks every single Discord event with individual toggles, filtering, and format
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import discord
 from redbot.core import Config, commands
