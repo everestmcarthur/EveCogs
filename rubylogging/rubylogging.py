@@ -189,6 +189,10 @@ class RubyLogging(commands.Cog):
         """Dynamically register all event handlers."""
         for category, events in EVENTS.items():
             for event in events:
+                # Skip message events - we handle those specially for attachment tracking
+                if event in ("message_delete", "raw_bulk_message_delete"):
+                    continue
+
                 handler_name = f"_log_{event}"
 
                 # Create dynamic handler
@@ -201,6 +205,7 @@ class RubyLogging(commands.Cog):
                 self._handlers[event] = handler
 
         # Register special handlers for attachment tracking
+        # These replace the default message_delete and bulk_delete handlers
         self.bot.add_listener(self._cache_message_attachments, "on_message")
         self.bot.add_listener(self._handle_message_delete_with_cache, "on_message_delete")
         self.bot.add_listener(self._handle_bulk_delete_with_cache, "on_bulk_message_delete")
@@ -287,11 +292,13 @@ class RubyLogging(commands.Cog):
         if not message.guild:
             return
 
+        # Check if there are cached attachments
+        cached = self._attachment_cache.pop(message.id, None)
+
         # Process the normal message_delete event
         await self._process_event("message_delete", "messages", message)
 
         # If message had cached attachments, log them separately
-        cached = self._attachment_cache.pop(message.id, None)
         if cached:
             await self._log_deleted_attachments(message, cached)
 
@@ -421,12 +428,15 @@ class RubyLogging(commands.Cog):
             embed.set_image(url=images_for_preview[0])
 
         try:
-            await channel.send(embed=embed)
+            sent_msg = await channel.send(embed=embed)
 
-            # Send additional previews if multiple images
+            # Send additional previews if multiple images (as separate embeds)
             if len(images_for_preview) > 1:
-                for preview_url in images_for_preview[1:max_previews]:
-                    preview_embed = discord.Embed(color=color)
+                for i, preview_url in enumerate(images_for_preview[1:max_previews], 2):
+                    preview_embed = discord.Embed(
+                        description=f"**Attachment {i}/{min(len(images_for_preview), max_previews)}**",
+                        color=color
+                    )
                     preview_embed.set_image(url=preview_url)
                     await channel.send(embed=preview_embed)
 
@@ -597,7 +607,7 @@ class RubyLogging(commands.Cog):
         category: str,
         args: List[Any],
         kwargs: Dict[str, Any],
-    ) -> discord.Embed:
+    ) -> Union[discord.Embed, List[discord.Embed]]:
         """Format event data into a beautiful, detailed embed."""
         config = self.config.guild(guild)
         format_type = await config.format()
@@ -675,6 +685,19 @@ class RubyLogging(commands.Cog):
         elif format_type == "json":
             await self._add_json_fields(embed, event_name, args, kwargs)
 
+        # Add image preview for messages with attachments
+        preview_url = None
+        if args and isinstance(args[0], discord.Message):
+            msg = args[0]
+            if msg.attachments:
+                for att in msg.attachments:
+                    if att.content_type and att.content_type.startswith("image/"):
+                        preview_url = att.url
+                        break
+
+        if preview_url:
+            embed.set_image(url=preview_url)
+
         return embed
 
     async def _add_detailed_fields(
@@ -685,25 +708,44 @@ class RubyLogging(commands.Cog):
         if "_update" in event_name and len(args) == 2:
             before, after = args[0], args[1]
 
-            # Add before state
-            before_str = await self._format_object(before)
-            if len(before_str) > 1024:
-                before_str = before_str[:1021] + "..."
-            embed.add_field(name="📤 Before", value=before_str, inline=False)
+            # For message edits, show a compact changes summary instead of full before/after
+            if isinstance(before, discord.Message) and isinstance(after, discord.Message):
+                changes = await self._detect_changes(before, after)
+                if changes:
+                    changes_str = "\n".join(f"• {change}" for change in changes)
+                    if len(changes_str) > 1024:
+                        changes_str = changes_str[:1021] + "..."
+                    embed.add_field(name="📝 Message Edit", value=changes_str, inline=False)
 
-            # Add after state
-            after_str = await self._format_object(after)
-            if len(after_str) > 1024:
-                after_str = after_str[:1021] + "..."
-            embed.add_field(name="📥 After", value=after_str, inline=False)
+                # Add message context
+                context = (
+                    f"**Author:** {after.author.mention}\n"
+                    f"**Channel:** {after.channel.mention if hasattr(after.channel, 'mention') else after.channel}\n"
+                    f"**Message ID:** `{after.id}`\n"
+                    f"**[Jump to Message]({after.jump_url})**"
+                )
+                embed.add_field(name="📍 Context", value=context, inline=False)
+            else:
+                # Standard before/after for other updates
+                # Add before state
+                before_str = await self._format_object(before)
+                if len(before_str) > 1024:
+                    before_str = before_str[:1021] + "..."
+                embed.add_field(name="📤 Before", value=before_str, inline=False)
 
-            # Add a changes summary for member/guild/role updates
-            changes = await self._detect_changes(before, after)
-            if changes:
-                changes_str = "\n".join(f"• {change}" for change in changes)
-                if len(changes_str) > 1024:
-                    changes_str = changes_str[:1021] + "..."
-                embed.add_field(name="🔄 Changes Detected", value=changes_str, inline=False)
+                # Add after state
+                after_str = await self._format_object(after)
+                if len(after_str) > 1024:
+                    after_str = after_str[:1021] + "..."
+                embed.add_field(name="📥 After", value=after_str, inline=False)
+
+                # Add a changes summary for member/guild/role updates
+                changes = await self._detect_changes(before, after)
+                if changes:
+                    changes_str = "\n".join(f"• {change}" for change in changes)
+                    if len(changes_str) > 1024:
+                        changes_str = changes_str[:1021] + "..."
+                    embed.add_field(name="🔄 Changes Detected", value=changes_str, inline=False)
 
         else:
             # Standard argument parsing
@@ -797,15 +839,17 @@ class RubyLogging(commands.Cog):
 
         elif isinstance(before, discord.Message) and isinstance(after, discord.Message):
             if before.content != after.content:
-                old_content = before.content[:50] + "..." if len(before.content) > 50 else before.content
-                new_content = after.content[:50] + "..." if len(after.content) > 50 else after.content
-                changes.append(f"**Content Changed**")
-                changes.append(f"Old: {old_content}")
-                changes.append(f"New: {new_content}")
+                old_content = before.content[:200] + "..." if len(before.content) > 200 else before.content or "*No text*"
+                new_content = after.content[:200] + "..." if len(after.content) > 200 else after.content or "*No text*"
+                changes.append(f"**Old Content:**\n{old_content}")
+                changes.append(f"**New Content:**\n{new_content}")
             if before.pinned != after.pinned:
-                changes.append(f"**Pinned:** {before.pinned} → {after.pinned}")
+                status = "📌 Pinned" if after.pinned else "Unpinned"
+                changes.append(f"**Pin Status:** {status}")
             if len(before.embeds) != len(after.embeds):
                 changes.append(f"**Embeds:** {len(before.embeds)} → {len(after.embeds)}")
+            if len(before.attachments) != len(after.attachments):
+                changes.append(f"**Attachments:** {len(before.attachments)} → {len(after.attachments)}")
 
         return changes
 
