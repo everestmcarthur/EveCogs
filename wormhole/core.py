@@ -157,7 +157,8 @@ class Wormhole(
         self._bg_tasks.append(asyncio.create_task(self._scheduled_msg_loop()))
         self._bg_tasks.append(asyncio.create_task(self._health_check_loop()))
         self._bg_tasks.append(asyncio.create_task(self._poll_expiry_loop()))
-        self._register_context_menus()
+        # Context menus disabled - eliminates registration complexity
+        # self._register_context_menus()
         self._ready.set()
         log.info("Wormhole v%s ready — %d networks loaded", self.__version__, len(nets))
 
