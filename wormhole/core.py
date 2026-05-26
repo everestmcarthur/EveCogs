@@ -94,7 +94,7 @@ log = logging.getLogger("red.evecogs.wormhole")
 _AUDIT_LIMIT = 500
 
 
-class Wormhole(
+class WormholeV4(
     # Listeners
     RelayListener,
     SyncListener,

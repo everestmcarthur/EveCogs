@@ -1,6 +1,6 @@
 """Wormhole v4.0.0 — the ultimate cross-server relay cog for Red-DiscordBot."""
 
-from .core import Wormhole
+from .core import WormholeV4
 
 __red_end_user_data_statement__ = (
     "This cog stores Discord user IDs, guild IDs, and channel IDs for relay functionality. "
@@ -10,6 +10,6 @@ __red_end_user_data_statement__ = (
 
 
 async def setup(bot):
-    cog = Wormhole(bot)
+    cog = WormholeV4(bot)
     await bot.add_cog(cog)
     await cog._init()
