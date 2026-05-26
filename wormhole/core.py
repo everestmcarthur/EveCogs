@@ -181,9 +181,10 @@ class Wormhole(
     async def cog_unload(self) -> None:
         for task in self._bg_tasks:
             task.cancel()
+        # Remove context menus (must specify type=discord.AppCommandType.message)
         for cmd_name in ("Report to Wormhole", "Bookmark (Wormhole)",
                          "Delete from Network", "Wormhole Profile"):
-            self.bot.tree.remove_command(cmd_name)
+            self.bot.tree.remove_command(cmd_name, type=discord.AppCommandType.message)
 
     # ── Background task loops ──────────────────────────────────────────────
 
