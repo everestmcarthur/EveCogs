@@ -169,6 +169,16 @@ class Wormhole(
         Note: slash commands are handled automatically by Red's hybrid_command
         decorator on the mixin classes — do NOT manually register duplicates.
         """
+        # Remove any existing context menus first (idempotent registration)
+        menu_names = ("Report to Wormhole", "Bookmark (Wormhole)",
+                      "Delete from Network", "Wormhole Profile")
+        for name in menu_names:
+            try:
+                self.bot.tree.remove_command(name, type=discord.AppCommandType.message)
+            except Exception:
+                pass  # Already removed or never existed
+
+        # Register context menus
         ctx_report = app_commands.ContextMenu(name="Report to Wormhole", callback=self._ctx_report_message)
         ctx_bookmark = app_commands.ContextMenu(name="Bookmark (Wormhole)", callback=self._ctx_bookmark_message)
         ctx_delete = app_commands.ContextMenu(name="Delete from Network", callback=self._ctx_delete_message)
