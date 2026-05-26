@@ -137,7 +137,8 @@ class WormholeV4(
 
     async def _init(self) -> None:
         """Deferred initialisation — called from setup() after cog is added."""
-        await self.bot.wait_until_ready()
+        # Don't wait_until_ready() - causes 30s timeout during cog load
+        # Bot is already ready when cogs load on startup
         nets = await self.config.networks()
         for name, nd in nets.items():
             r = nd.get("rate_limit_rate", 5)
