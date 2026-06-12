@@ -153,40 +153,15 @@ class Support(commands.Cog):
         self.bot.add_view(self._control_view)
 
         self._cleanup_task: Optional[asyncio.Task] = None
-        self._disabled_core_commands = []
 
     async def cog_load(self):
-        """Start background tasks and disable core commands on cog load."""
+        """Start background tasks on cog load."""
         self._cleanup_task = asyncio.create_task(self._thread_cleanup_loop())
-        await self._disable_core_commands()
 
     async def cog_unload(self):
-        """Clean up and re-enable core commands on unload."""
+        """Clean up on unload."""
         if self._cleanup_task:
             self._cleanup_task.cancel()
-        await self._enable_core_commands()
-
-    async def _disable_core_commands(self):
-        """Disable Red's built-in contact and dm commands."""
-        core_cog = self.bot.get_cog("Core")
-        if not core_cog:
-            return
-
-        commands_to_disable = ["contact", "dm"]
-
-        for cmd_name in commands_to_disable:
-            cmd = self.bot.get_command(cmd_name)
-            if cmd and cmd.cog_name == "Core":
-                cmd.enabled = False
-                self._disabled_core_commands.append(cmd_name)
-
-    async def _enable_core_commands(self):
-        """Re-enable Red's core commands when this cog unloads."""
-        for cmd_name in self._disabled_core_commands:
-            cmd = self.bot.get_command(cmd_name)
-            if cmd:
-                cmd.enabled = True
-        self._disabled_core_commands.clear()
 
     # ── Data Management ──────────────────────────────────────────────────────
     async def red_delete_data_for_user(self, *, requester: Literal["discord", "owner", "user", "user_strict"], user_id: int):
