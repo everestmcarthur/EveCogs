@@ -1,0 +1,20 @@
+{
+    "author": ["EveCogs"],
+    "name": "Support",
+    "short": "Modernized DM/contact system with categories",
+    "description": "A comprehensive support system that replaces Red's built-in contact and dm commands with enhanced features including categories, channels, customizable greetings, anonymous mode, logging, and user blocking.",
+    "install_msg": "Thanks for installing Support! Use `[p]supportset` to configure categories and channels. This cog overrides the built-in `contact` and `dm` commands with more features.",
+    "end_user_data_statement": "This cog stores Discord user IDs, guild IDs, channel IDs, and message content for support functionality.",
+    "tags": [
+        "support",
+        "contact",
+        "dm",
+        "modmail",
+        "tickets",
+        "communication",
+        "utility"
+    ],
+    "requirements": [],
+    "min_bot_version": "3.5.0",
+    "type": "COG"
+}
