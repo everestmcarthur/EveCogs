@@ -266,7 +266,7 @@ class RelayListener:
         except Exception as exc:
             log.debug("Auto-response error (relay continues): %s", exc)
 
-        # ── Relay ──────────────────────────────────────────────────────────
+        # ── Relay ─────────────────────────────────────────────────────────
         if _tracing:
             trace.append("✅ All gate checks passed — calling _do_relay")
         try:
@@ -385,6 +385,9 @@ class RelayListener:
             if bd and not bd.get("frozen"):
                 relay_targets.extend(bd.get("channels", []))
 
+        # ── Disallow all mentions in relay ──────────────────────────────────
+        no_mentions = discord.AllowedMentions(parse=[])
+
         # ── Send to each target channel ────────────────────────────────────
         mapping: Dict[int, int] = {}
         for ch_id in relay_targets:
@@ -414,7 +417,12 @@ class RelayListener:
                     ee, ef = build_emoji_embeds_and_files(emoji_img_data)
                     em = build_relay_embed(message, nick, user_colour or nd.get("colour"))
                     all_embeds = [em] + (extra_embeds or []) + ee
-                    sent_msg = await ch.send(embeds=all_embeds[:10], files=ef or None, **_view_kw)
+                    sent_msg = await ch.send(
+                        embeds=all_embeds[:10],
+                        files=ef or None,
+                        allowed_mentions=no_mentions,
+                        **_view_kw,
+                    )
                 elif ch_mode == "compact":
                     g = nick or message.guild.name
                     display = anon_name if is_anon else message.author.display_name
@@ -430,6 +438,7 @@ class RelayListener:
                         content=compact_format(g, display, content),
                         files=files or None,
                         embeds=ce[:10] or None,
+                        allowed_mentions=no_mentions,
                         **_view_kw,
                     )
 
@@ -472,6 +481,8 @@ class RelayListener:
         if not send_content and not files and not all_embeds:
             send_content = "*[empty message]*"
 
+        no_mentions = discord.AllowedMentions(parse=[])
+
         try:
             wh = await self._wh(ch)
             return await wh.send(
@@ -481,6 +492,7 @@ class RelayListener:
                 files=files or discord.utils.MISSING,
                 embeds=all_embeds[:10] or discord.utils.MISSING,
                 wait=True,
+                allowed_mentions=no_mentions,
                 **view_kw,
             )
         except (discord.NotFound, discord.InvalidData):
@@ -506,13 +518,22 @@ class RelayListener:
                     files=files2 or discord.utils.MISSING,
                     embeds=all_embeds2[:10] or discord.utils.MISSING,
                     wait=True,
+                    allowed_mentions=no_mentions,
                     **view_kw,
                 )
             except Exception:
                 log.warning("Webhook retry failed for %s, falling back to embed", ch.id)
                 em = build_relay_embed(message, nick, nd.get("colour"))
-                return await ch.send(embeds=[em] + (extra_embeds or [])[:9], **view_kw)
+                return await ch.send(
+                    embeds=[em] + (extra_embeds or [])[:9],
+                    allowed_mentions=no_mentions,
+                    **view_kw,
+                )
         except discord.Forbidden:
             log.warning("No webhook perms in %s, falling back to embed", ch.id)
             em = build_relay_embed(message, nick, nd.get("colour"))
-            return await ch.send(embeds=[em] + (extra_embeds or [])[:9], **view_kw)
+            return await ch.send(
+                embeds=[em] + (extra_embeds or [])[:9],
+                allowed_mentions=no_mentions,
+                **view_kw,
+            )
