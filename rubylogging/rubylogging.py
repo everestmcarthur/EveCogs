@@ -299,14 +299,11 @@ class RubyLogging(commands.Cog):
         if not message.guild:
             return
 
-        # Check if there are cached attachments
-        cached = self._attachment_cache.pop(message.id, None)
-
-        # If we have cached attachments, pass them through in the event data
-        # so the preview can be shown in the main delete log
-        if cached:
-            # Add cached data to message object temporarily
-            message._cached_attachments = cached  # type: ignore
+        # Peek (don't evict yet) — discord.Message uses __slots__, so cached
+        # data can't be stashed as an extra attribute on the message object.
+        # _build_embed() looks this up from self._attachment_cache by message
+        # id instead, so the entry needs to still be there while it runs.
+        cached = self._attachment_cache.get(message.id)
 
         # Process the normal message_delete event (this will show the preview if cached)
         await self._process_event("message_delete", "messages", message)
@@ -316,6 +313,9 @@ class RubyLogging(commands.Cog):
             config = self.config.guild(message.guild)
             if await config.log_attachments():
                 await self._log_deleted_attachments(message, cached)
+
+        # Now safe to evict — nothing below this point needs it.
+        self._attachment_cache.pop(message.id, None)
 
     async def _handle_bulk_delete_with_cache(self, messages: List[discord.Message]) -> None:
         """Handle bulk message deletion with cached attachments."""
@@ -372,7 +372,6 @@ class RubyLogging(commands.Cog):
         reupload = await config.reupload_attachments()
 
         # Build embed
-        accent = await config.accent_color()
         color_coded = await config.color_coded()
         include_timestamp = await config.include_timestamp()
 
@@ -510,7 +509,6 @@ class RubyLogging(commands.Cog):
         if not channel or not isinstance(channel, discord.TextChannel):
             return
 
-        accent = await config.accent_color()
         color_coded = await config.color_coded()
         color = discord.Color.red() if color_coded else discord.Color.greyple()
 
@@ -740,9 +738,11 @@ class RubyLogging(commands.Cog):
         if args and isinstance(args[0], discord.Message):
             msg = args[0]
 
-            # First check for cached attachments (for deleted messages)
-            if hasattr(msg, '_cached_attachments'):
-                cached = msg._cached_attachments
+            # First check for cached attachments (for deleted messages) — looked
+            # up by message id, since discord.Message uses __slots__ and can't
+            # hold an extra attribute stashed onto the object itself.
+            cached = self._attachment_cache.get(msg.id)
+            if cached:
                 for att_data in cached:
                     if att_data.get('is_image'):
                         # Use proxy URL which lasts longer
