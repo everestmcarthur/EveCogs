@@ -1,0 +1,22 @@
+{
+    "author": ["everestmcarthur"],
+    "install_msg": "Thanks for installing **ImageVault**! First create a private channel only staff can see, then run `[p]imagevault vaultchannel #that-channel` followed by `[p]imagevault enable`. Members can retrieve a removed image with `[p]imagevault show <id>` — check `[p]imagevault settings` for the full config.",
+    "name": "ImageVault",
+    "short": "Auto-deletes posted images and re-hosts them in a private vault channel so they can be retrieved on request. Spoilers stay spoilered.",
+    "description": "ImageVault watches for image attachments in configured channels, silently reposts each one (with full attribution and original message text) into a staff-only vault channel, then deletes the original message — keeping channels clean without actually losing anything. Anyone (or, if configured, only the original poster or staff) can bring an image back with `[p]imagevault show <id>`, and if the original was posted as a Discord spoiler it comes back spoilered too. Highly configurable per-server: choose which channels are watched (or watch everything), ignore specific channels, toggle whether originals are actually deleted (archive-only mode) or whether the text content is reposted after removal, set a max file size, ignore bot/webhook posts, and control who is allowed to retrieve archived images. Includes `list`/`mine` to browse the archive and `forget` to drop an index entry.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "tags": [
+        "images",
+        "moderation",
+        "cleanup",
+        "spoiler",
+        "archive",
+        "vault",
+        "declutter",
+        "media"
+    ],
+    "type": "COG",
+    "requirements": []
+}
+

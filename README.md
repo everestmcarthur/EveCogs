@@ -178,6 +178,43 @@ Fires only on `on_member_remove` — covering voluntary leaves, kicks, and bans 
 
 ---
 
+# ImageVault
+
+**Auto-deletes posted images and re-hosts them in a private vault channel so they can be retrieved on request.**
+
+Watches configured channels for image attachments, silently reposts each image (plus the message's text and full attribution) into a staff-only vault channel, then deletes the original — keeping channels clean without anything actually being lost. Because images are re-hosted on Discord rather than linked directly, there's no link-expiry problem: retrieval always fetches a fresh copy straight from the vault message. Spoilered images stay spoilered when they're sent back.
+
+## Feature Highlights
+
+| Category | Features |
+|----------|----------|
+| **Archiving** | Re-uploads images into a private vault channel before deleting the original; preserves spoiler tags round-trip |
+| **Scope** | Watch specific channels (or everything), ignore specific channels, ignore bots/webhooks, max file size |
+| **Behavior** | Archive-only mode (skip deletion), optional text-content repost after removal |
+| **Retrieval** | `show`/`get <id>` re-sends the image; permission modes: anyone / original poster / staff only |
+| **Browsing** | `list` and `mine` to browse the archive, `forget` to drop an index entry |
+
+## Command Reference (`[p]imagevault`, aliases `iv`/`vault`)
+
+| Command | Description |
+|---------|-------------|
+| `enable` / `disable` | Toggle ImageVault (requires a vault channel first) |
+| `vaultchannel #channel` | Set the private channel images get archived into |
+| `watchchannel add/remove/list` | Channels to watch (empty = all channels) |
+| `ignorechannel add/remove/list` | Channels to never touch |
+| `deleteoriginal <bool>` | Toggle actually deleting the original vs. archive-only |
+| `repost <bool>` | Toggle reposting text content after an image is removed |
+| `ignorebots <bool>` | Toggle processing bot/webhook messages |
+| `maxsize <mb>` | Max image size to archive |
+| `retrieve <anyone\|author\|staff>` | Who can retrieve archived images |
+| `settings` | Full configuration summary |
+| `show`/`get <id>` | Retrieve an archived image |
+| `list [page]` / `mine [page]` | Browse the archive |
+| `forget <id>` | Drop an index entry (staff only) |
+| `stats` | Lifetime archive count |
+
+---
+
 ## Architecture
 
 ```
