@@ -309,6 +309,9 @@ class GhostWipe(commands.Cog):
                 "messages": [],
             }
 
+        # channel.history()/purge() return newest-first; the report reads far
+        # more naturally in actual conversation order.
+        collected.sort(key=lambda m: m.created_at)
         messages = [self._serialize_message(m) for m in collected]
         return {
             "id": str(channel.id),
@@ -541,7 +544,7 @@ class GhostWipe(commands.Cog):
         if top:
             breakdown = "\n".join(f"**{c['name']}** — {c['message_count']}" for c in top)
             embed.add_field(name="Per-Channel Breakdown", value=breakdown, inline=False)
-        embed.set_footer(text=f"GhostWipe v{self.__version__}")
+        embed.set_footer(text=f"Ruby · GhostWipe v{self.__version__}")
 
         file_obj = None
         if conf["attach_html_report"]:
@@ -903,7 +906,7 @@ class GhostWipe(commands.Cog):
                   f"{humanize_number(stats.get('total_messages_deleted', 0))} messages deleted",
             inline=False,
         )
-        embed.set_footer(text=f"GhostWipe v{self.__version__}")
+        embed.set_footer(text=f"Ruby · GhostWipe v{self.__version__}")
         await ctx.send(embed=embed)
 
     @ghostwipe.command(name="history")
