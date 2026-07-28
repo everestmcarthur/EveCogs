@@ -160,6 +160,7 @@ class WormholeV4(
         self._bg_tasks.append(asyncio.create_task(self._poll_expiry_loop()))
         # Context menus disabled - eliminates registration complexity
         # self._register_context_menus()
+        self._register_find_origin_context_menu()
         self._ready.set()
         log.info("Wormhole v%s ready — %d networks loaded", self.__version__, len(nets))
 
@@ -195,7 +196,7 @@ class WormholeV4(
             task.cancel()
         # Remove context menus (must specify type=discord.AppCommandType.message)
         for cmd_name in ("Report to Wormhole", "Bookmark (Wormhole)",
-                         "Delete from Network", "Wormhole Profile"):
+                         "Delete from Network", "Wormhole Profile", "Find Origin"):
             self.bot.tree.remove_command(cmd_name, type=discord.AppCommandType.message)
 
     # ── Background task loops ──────────────────────────────────────────────
@@ -740,5 +741,92 @@ class WormholeV4(
                 inline=True,
             )
         await interaction.response.send_message(embed=em, ephemeral=True)
+
+    async def _ctx_find_origin(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        """Context menu: resolve a relayed copy back to its true origin server/channel/author.
+
+        The relay map only tracks relayed-copy id -> original id (there's no
+        direct index of "which channel is the origin for this message"), so
+        when the right-clicked message isn't itself the original, this falls
+        back to searching the network's member channels — the same technique
+        `_ctx_delete_message`/`wh mod nuke` already use for the same reason.
+        """
+        net_name = await self._net_for_ch(message.channel.id)
+        if not net_name:
+            await interaction.response.send_message(
+                "This channel isn't part of a wormhole network.", ephemeral=True
+            )
+            return
+        nd = await self._net(net_name)
+        if not has_role(nd, interaction.user.id, Role.MODERATOR) and not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("You need Moderator role or higher.", ephemeral=True)
+            return
+
+        orig_id = self.msg_map.get_original(net_name, message.id) or message.id
+
+        if orig_id == message.id:
+            origin_message = message
+        else:
+            origin_message = None
+            for ch_id in nd.get("channels", []):
+                ch = self.bot.get_channel(ch_id)
+                if not ch:
+                    continue
+                try:
+                    origin_message = await ch.fetch_message(orig_id)
+                    break
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+
+        if not origin_message:
+            await interaction.response.send_message(
+                "Couldn't locate the original message — it may have been deleted, "
+                "or predates the bot's current in-memory relay map.",
+                ephemeral=True,
+            )
+            return
+
+        # If what we resolved still looks like a relayed copy (bot/webhook authored)
+        # rather than a genuine human original, the map couldn't fully resolve it —
+        # say so plainly instead of confidently showing the wrong server as "the origin".
+        looks_relayed = origin_message.webhook_id is not None or origin_message.author.id == self.bot.user.id
+        if looks_relayed and orig_id == message.id:
+            await interaction.response.send_message(
+                "This looks like a relayed copy, but its true origin isn't in the "
+                "bot's in-memory relay map (it may predate the bot's current session).",
+                ephemeral=True,
+            )
+            return
+
+        guild = origin_message.guild
+        channel = origin_message.channel
+        author = origin_message.author
+
+        embed = discord.Embed(title="🔎 Wormhole — Origin Found", colour=COLOUR_INFO)
+        embed.add_field(name="Server", value=f"{guild.name}\n`{guild.id}`" if guild else "Unknown", inline=True)
+        embed.add_field(
+            name="Channel",
+            value=channel.mention if hasattr(channel, "mention") else str(channel),
+            inline=True,
+        )
+        embed.add_field(name="Author", value=f"{author}\n`{author.id}`", inline=True)
+        embed.add_field(name="Message ID", value=f"`{origin_message.id}`", inline=True)
+        embed.add_field(name="Jump to Message", value=f"[Click here]({origin_message.jump_url})", inline=True)
+        if author.display_avatar:
+            embed.set_thumbnail(url=author.display_avatar.url)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await self._audit(net_name, "ctx_find_origin", str(interaction.user), str(orig_id))
+
+    def _register_find_origin_context_menu(self) -> None:
+        """Register the "Find Origin" context menu independently of the bulk
+        Report/Bookmark/Delete/Profile registration above, which is currently
+        disabled — leaving that decision alone rather than reviving it as a
+        side effect of adding this one."""
+        try:
+            self.bot.tree.remove_command("Find Origin", type=discord.AppCommandType.message)
+        except Exception:
+            pass
+        ctx_find_origin = app_commands.ContextMenu(name="Find Origin", callback=self._ctx_find_origin)
+        self.bot.tree.add_command(ctx_find_origin)
 
     # ── Root command group is defined in commands/_base.py ────────────────
