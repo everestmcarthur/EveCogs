@@ -158,8 +158,7 @@ class WormholeV4(
         self._bg_tasks.append(asyncio.create_task(self._scheduled_msg_loop()))
         self._bg_tasks.append(asyncio.create_task(self._health_check_loop()))
         self._bg_tasks.append(asyncio.create_task(self._poll_expiry_loop()))
-        # Context menus disabled - eliminates registration complexity
-        # self._register_context_menus()
+        self._register_context_menus()
         self._register_find_origin_context_menu()
         self._ready.set()
         log.info("Wormhole v%s ready — %d networks loaded", self.__version__, len(nets))
@@ -173,8 +172,7 @@ class WormholeV4(
         decorator on the mixin classes — do NOT manually register duplicates.
         """
         # Remove any existing context menus first (idempotent registration)
-        menu_names = ("Report to Wormhole", "Bookmark (Wormhole)",
-                      "Delete from Network", "Wormhole Profile")
+        menu_names = ("Report to Wormhole", "Delete from Network", "Wormhole Profile")
         for name in menu_names:
             try:
                 self.bot.tree.remove_command(name, type=discord.AppCommandType.message)
@@ -183,11 +181,9 @@ class WormholeV4(
 
         # Register context menus
         ctx_report = app_commands.ContextMenu(name="Report to Wormhole", callback=self._ctx_report_message)
-        ctx_bookmark = app_commands.ContextMenu(name="Bookmark (Wormhole)", callback=self._ctx_bookmark_message)
         ctx_delete = app_commands.ContextMenu(name="Delete from Network", callback=self._ctx_delete_message)
         ctx_profile = app_commands.ContextMenu(name="Wormhole Profile", callback=self._ctx_view_profile)
         self.bot.tree.add_command(ctx_report)
-        self.bot.tree.add_command(ctx_bookmark)
         self.bot.tree.add_command(ctx_delete)
         self.bot.tree.add_command(ctx_profile)
 
@@ -195,8 +191,7 @@ class WormholeV4(
         for task in self._bg_tasks:
             task.cancel()
         # Remove context menus (must specify type=discord.AppCommandType.message)
-        for cmd_name in ("Report to Wormhole", "Bookmark (Wormhole)",
-                         "Delete from Network", "Wormhole Profile", "Find Origin"):
+        for cmd_name in ("Report to Wormhole", "Delete from Network", "Wormhole Profile", "Find Origin"):
             self.bot.tree.remove_command(cmd_name, type=discord.AppCommandType.message)
 
     # ── Background task loops ──────────────────────────────────────────────
@@ -662,25 +657,6 @@ class WormholeV4(
         modal = ReportModal(self, net_name, message)
         await interaction.response.send_modal(modal)
 
-    async def _ctx_bookmark_message(self, interaction: discord.Interaction, message: discord.Message) -> None:
-        uid_str = str(interaction.user.id)
-        bookmark = {
-            "content": truncate(message.content or "*[no text]*", 500),
-            "author": str(message.author),
-            "server": message.guild.name if message.guild else "DM",
-            "channel": message.channel.name if hasattr(message.channel, "name") else "DM",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "jump_url": message.jump_url,
-        }
-        async with self.config.bookmarks() as bm:
-            bm.setdefault(uid_str, []).append(bookmark)
-            if len(bm[uid_str]) > 50:
-                bm[uid_str] = bm[uid_str][-50:]
-        await interaction.response.send_message(
-            embed=ok_embed("Message bookmarked! Use `wh bm list` to view."),
-            ephemeral=True,
-        )
-
     async def _ctx_delete_message(self, interaction: discord.Interaction, message: discord.Message) -> None:
         net_name = await self._net_for_ch(message.channel.id)
         if not net_name:
@@ -716,30 +692,59 @@ class WormholeV4(
 
     async def _ctx_view_profile(self, interaction: discord.Interaction, user: discord.User) -> None:
         nets = await self.config.networks()
+        global_banned = await self.config.global_banned_users()
+
         profiles_found = []
+        total_messages = 0
         for name, nd in nets.items():
             p = nd.get("user_profiles", {}).get(str(user.id))
-            if p:
-                role = get_role(nd, user.id)
-                profiles_found.append((name, p, role))
+            if not p:
+                continue
+            role = get_role(nd, user.id)
+            karma = nd.get("karma_scores", {}).get(str(user.id), 0)
+            is_banned = user.id in nd.get("banned_users", [])
+            is_muted = user.id in nd.get("muted_users", [])
+            profiles_found.append((name, p, role, karma, is_banned, is_muted))
+            total_messages += p.get("message_count", 0)
+
         if not profiles_found:
             await interaction.response.send_message("No wormhole profile found for this user.", ephemeral=True)
             return
-        em = discord.Embed(
-            title=f"🌀 Wormhole Profile — {user.display_name}",
-            colour=COLOUR_INFO,
-        )
+
+        # Busiest networks first — most relevant at a glance
+        profiles_found.sort(key=lambda t: t[1].get("message_count", 0), reverse=True)
+
+        em = discord.Embed(title=f"🌀 Wormhole Profile — {user.display_name}", colour=COLOUR_INFO)
         em.set_thumbnail(url=user.display_avatar.url)
-        for name, p, role in profiles_found[:10]:
+        em.add_field(name="User", value=f"{user}\n`{user.id}`", inline=True)
+        em.add_field(name="Account Created", value=discord.utils.format_dt(user.created_at, "R"), inline=True)
+        em.add_field(name="Networks Active In", value=str(len(profiles_found)), inline=True)
+        em.add_field(name="Total Messages (all networks)", value=f"{total_messages:,}", inline=True)
+
+        if user.id in global_banned:
+            em.add_field(name="⚠️ Global Status", value="**Banned from Wormhole network-wide**", inline=False)
+
+        for name, p, role, karma, is_banned, is_muted in profiles_found[:10]:
+            status_flags = []
+            if is_banned:
+                status_flags.append("🚫 Banned")
+            if is_muted:
+                status_flags.append("🔇 Muted")
+            status_str = " · ".join(status_flags) if status_flags else "✅ Active"
             em.add_field(
                 name=f"Network: {name}",
                 value=(
                     f"Role: **{role_name(role)}**\n"
                     f"Messages: {p.get('message_count', 0):,}\n"
-                    f"First seen: {p.get('first_seen', 'Unknown')[:10]}"
+                    f"Karma: {karma}\n"
+                    f"Servers seen in: {len(p.get('servers', []))}\n"
+                    f"First seen: {p.get('first_seen', 'Unknown')[:10]}\n"
+                    f"Status: {status_str}"
                 ),
                 inline=True,
             )
+        if len(profiles_found) > 10:
+            em.set_footer(text=f"Showing 10 of {len(profiles_found)} networks (busiest first)")
         await interaction.response.send_message(embed=em, ephemeral=True)
 
     async def _ctx_find_origin(self, interaction: discord.Interaction, message: discord.Message) -> None:

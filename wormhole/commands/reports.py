@@ -21,23 +21,41 @@ class ReportCommands(WormholeBase):
         net_name = await self._net_for_ch(ctx.channel.id)
         if not net_name:
             return await ctx.send(embed=err_embed("This channel isn't in a network."))
-        nd = await self._net(net_name)
-        report_id = nd.get("report_counter", 0) + 1
-        report = {
-            "id": report_id,
-            "reporter_id": ctx.author.id,
-            "message_id": message_id,
-            "channel_id": ctx.channel.id,
-            "guild_id": ctx.guild.id if ctx.guild else None,
-            "reason": reason,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "resolved": False,
-            "resolved_by": None,
-            "resolution": None,
-        }
+
+        # Fetch the message so the report actually records who wrote it and
+        # what it said, instead of just a bare, unverified id.
+        target_message = None
+        try:
+            target_message = await ctx.channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+        # report_id must be computed and written inside the same locked
+        # section — reading report_counter beforehand let two concurrent
+        # reports land on the same id and left the counter not advanced.
         async with self.config.networks() as ns:
-            ns[net_name].setdefault("reports", []).append(report)
-            ns[net_name]["report_counter"] = report_id
+            nd = ns.get(net_name)
+            if not nd:
+                return await ctx.send(embed=err_embed(f"Network `{net_name}` not found."))
+            report_id = nd.get("report_counter", 0) + 1
+            report = {
+                "id": report_id,
+                "reporter_id": ctx.author.id,
+                "author_id": target_message.author.id if target_message else None,
+                "message_id": message_id,
+                "channel_id": ctx.channel.id,
+                "guild_id": ctx.guild.id if ctx.guild else None,
+                "content_preview": truncate(target_message.content or "*[no text]*", 300) if target_message else None,
+                "jump_url": target_message.jump_url if target_message else None,
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "resolved": False,
+                "resolved_by": None,
+                "resolution": None,
+            }
+            nd.setdefault("reports", []).append(report)
+            nd["report_counter"] = report_id
+
         await ctx.send(embed=ok_embed(f"Report #{report_id} submitted. Staff will review it."), delete_after=10)
         await self._log(nd, warn_embed(
             f"🚩 **Report #{report_id}**\n"
@@ -87,11 +105,19 @@ class ReportCommands(WormholeBase):
         reporter = self.bot.get_user(report.get("reporter_id"))
         em = discord.Embed(title=f"🚩 Report #{report_id}", colour=COLOUR_INFO)
         em.add_field(name="Reporter", value=str(reporter or report.get("reporter_id")), inline=True)
+        if report.get("author_id"):
+            author = self.bot.get_user(report["author_id"])
+            em.add_field(name="Message Author", value=str(author or report["author_id"]), inline=True)
         em.add_field(name="Status", value="Resolved" if report.get("resolved") else "Open", inline=True)
         em.add_field(name="Reason", value=report.get("reason", "N/A"), inline=False)
+        if report.get("content_preview"):
+            em.add_field(name="Message Content", value=truncate(report["content_preview"], 1024), inline=False)
         em.add_field(name="Timestamp", value=report.get("timestamp", "?")[:16], inline=True)
         if report.get("message_id"):
-            em.add_field(name="Message ID", value=str(report["message_id"]), inline=True)
+            id_value = f"`{report['message_id']}`"
+            if report.get("jump_url"):
+                id_value += f" — [Jump]({report['jump_url']})"
+            em.add_field(name="Message ID", value=id_value, inline=True)
         if report.get("resolved_by"):
             resolver = self.bot.get_user(report["resolved_by"])
             em.add_field(name="Resolved By", value=str(resolver or report["resolved_by"]), inline=True)
