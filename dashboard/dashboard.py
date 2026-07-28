@@ -51,7 +51,12 @@ class EveDash(commands.Cog):
             force_registration=True,
         )
         self.config.register_global(
-            host="0.0.0.0",
+            # Localhost-only by default — loading this cog with zero config
+            # shouldn't immediately expose an unauthenticated-until-login web
+            # server on every network interface. Owners who want it reachable
+            # externally (e.g. no reverse proxy) can opt in with
+            # `[p]evedash host 0.0.0.0`.
+            host="127.0.0.1",
             port=42356,
             client_id=None,
             client_secret=None,

@@ -17,6 +17,7 @@ import time
 import typing
 
 import aiohttp
+import discord
 from aiohttp import web
 
 if typing.TYPE_CHECKING:
@@ -259,12 +260,29 @@ class DashboardServer:
             f"&scope=identify+guilds"
             f"&state={state}"
         )
-        return _json({"url": url, "state": state})
+        resp = _json({"url": url, "state": state})
+        # Bind this state to the browser that requested it via a short-lived
+        # cookie, so the callback can confirm the redirect actually belongs
+        # to a login flow we started — otherwise an attacker's own
+        # authorization code could be handed to a victim's browser and get
+        # bound to the victim's session (login CSRF / session fixation).
+        resp.set_cookie(
+            "oauth_state", state,
+            max_age=600,
+            httponly=True,
+            samesite="Lax",
+        )
+        return resp
 
     async def _auth_callback(self, request: web.Request) -> web.Response:
         code = request.query.get("code")
         if not code:
             return _err("Missing authorization code")
+
+        state = request.query.get("state")
+        expected_state = request.cookies.get("oauth_state")
+        if not state or not expected_state or not hmac.compare_digest(state, expected_state):
+            return _err("Invalid or missing state parameter", 400)
 
         client_id = await self.cog.config.client_id()
         client_secret = await self.cog.config.client_secret()
@@ -302,6 +320,17 @@ class DashboardServer:
         is_owner = user_id in self.bot.owner_ids
         has_guild = any(g.get_member(user_id) for g in self.bot.guilds)
         if not is_owner and not has_guild:
+            # Cache miss rather than genuinely no shared guilds? This only
+            # runs once per login (not a hot path), so it's worth confirming
+            # with a live check before denying a real user access.
+            for g in self.bot.guilds:
+                try:
+                    if await g.fetch_member(user_id):
+                        has_guild = True
+                        break
+                except (discord.NotFound, discord.HTTPException):
+                    continue
+        if not is_owner and not has_guild:
             return _err("You don't share any servers with this bot", 403)
 
         # Check blacklist
@@ -322,6 +351,7 @@ class DashboardServer:
             httponly=True,
             samesite="Lax",
         )
+        resp.del_cookie("oauth_state")
         return resp
 
     async def _auth_me(self, request: web.Request) -> web.Response:
@@ -437,7 +467,7 @@ class DashboardServer:
         if not guild:
             return _err("Guild not found", 404)
 
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         return _json({
@@ -462,7 +492,7 @@ class DashboardServer:
         guild = self._get_guild(request)
         if not guild:
             return _err("Guild not found", 404)
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         channels = []
@@ -480,7 +510,7 @@ class DashboardServer:
         guild = self._get_guild(request)
         if not guild:
             return _err("Guild not found", 404)
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         roles = []
@@ -503,7 +533,7 @@ class DashboardServer:
         guild = self._get_guild(request)
         if not guild:
             return _err("Guild not found", 404)
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         prefixes = await self.bot.get_valid_prefixes(guild)
@@ -534,7 +564,7 @@ class DashboardServer:
         guild = self._get_guild(request)
         if not guild:
             return _err("Guild not found", 404)
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         data = await request.json()
@@ -568,7 +598,7 @@ class DashboardServer:
         guild = self._get_guild(request)
         if not guild:
             return _err("Guild not found", 404)
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         disabled_cmds = await self.bot._config.guild(guild).disabled_commands()
@@ -600,7 +630,7 @@ class DashboardServer:
         guild = self._get_guild(request)
         if not guild:
             return _err("Guild not found", 404)
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         cmd_name = request.match_info["command"]
@@ -693,7 +723,7 @@ class DashboardServer:
         guild = self._get_guild(request)
         if not guild:
             return _err("Guild not found", 404)
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         tp_info = self.cog.third_parties.get_third_parties_info()
@@ -703,7 +733,7 @@ class DashboardServer:
         guild = self._get_guild(request)
         if not guild:
             return _err("Guild not found", 404)
-        if not self._check_guild_access(request, guild):
+        if not await self._check_guild_access(request, guild):
             return _err("Forbidden", 403)
 
         cog_name = request.match_info["cog_name"]
@@ -851,7 +881,18 @@ class DashboardServer:
 
     async def _serve_spa(self, request: web.Request) -> web.Response:
         path = request.match_info.get("path", "")
-        file_path = WEB_DIR / path
+
+        # Resolve and verify the final path stays inside WEB_DIR before ever
+        # touching the filesystem — rejects `../`, percent-encoded traversal
+        # (e.g. `..%2f`), and symlink escapes alike. This route is reachable
+        # with no authentication (see the auth middleware's path allowlist),
+        # so this check is the only thing standing between it and arbitrary
+        # file read on the host.
+        try:
+            file_path = (WEB_DIR / path).resolve()
+            file_path.relative_to(WEB_DIR.resolve())
+        except (ValueError, OSError):
+            return _err("Not found", 404)
 
         # Serve actual files if they exist
         if file_path.is_file():
@@ -872,11 +913,18 @@ class DashboardServer:
         except (KeyError, ValueError):
             return None
 
-    def _check_guild_access(self, request: web.Request, guild) -> bool:
+    async def _check_guild_access(self, request: web.Request, guild) -> bool:
         if request["is_owner"]:
             return True
         user_id = request["user_id"]
         member = guild.get_member(user_id)
         if not member:
-            return False
+            # Cache miss (e.g. Members intent not warmed for this guild yet)
+            # shouldn't wrongly deny a real admin — fall back to a live fetch.
+            # Only done for single-guild endpoints (this method), never in
+            # bulk over every guild the bot is in — see _guilds_list.
+            try:
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.HTTPException):
+                return False
         return member.guild_permissions.manage_guild or member.guild_permissions.administrator
