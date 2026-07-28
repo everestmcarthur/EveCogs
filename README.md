@@ -136,6 +136,48 @@ Connect Discord channels across unlimited servers into named networks. All comma
 
 ---
 
+# GhostWipe
+
+**Auto-deletes a departing member's messages server-wide, with a full HTML audit-log viewer.**
+
+Fires only on `on_member_remove` — covering voluntary leaves, kicks, and bans alike (Discord delivers all three through that single event). GhostWipe then classifies *why* the member left via the audit log, purges every message they ever sent across text channels, voice-channel chats, and threads (including archived ones), and produces a complete audit trail: a summary embed plus a self-contained, dark/light-themed HTML report with sidebar channel switching, search, and attachment previews.
+
+## Feature Highlights
+
+| Category | Features |
+|----------|----------|
+| **Deletion** | Server-wide purge across text channels, voice chats, active + archived threads |
+| **Triggers** | Independently toggle leave / kick / ban as purge triggers |
+| **Exemptions** | Whitelist specific users, ignore specific roles or channels |
+| **Safety** | Dry-run/simulation mode, grace-period delay that auto-cancels on rejoin, rate-limited scanning |
+| **Reporting** | Self-contained HTML viewer (channel switching, search, attachment previews), per-channel breakdown embed, content redaction for privacy, configurable retention |
+| **Review** | `history` and `viewreport` to revisit and re-send past purge events, lifetime `stats` |
+| **Manual** | `purge` command to backfill a departure GhostWipe missed |
+
+## Command Reference (`[p]ghostwipe`, aliases `gw`/`wipe`)
+
+| Command | Description |
+|---------|-------------|
+| `enable` / `disable` | Toggle GhostWipe for this server |
+| `logchannel [#channel]` | Set/clear where purge reports are posted |
+| `trigger <leave\|kick\|ban> <bool>` | Toggle which departure types trigger a purge |
+| `whitelist add/remove/list` | Users who are never purged |
+| `ignorerole add/remove/list` | Roles that exempt a member from being purged |
+| `ignorechannel add/remove/list` | Channels/threads never scanned |
+| `scanlimit <messages\|none>` | Per-channel scan depth (or unlimited) |
+| `threads` / `archivedthreads` | Toggle scanning active/archived threads |
+| `dryrun <bool>` | Simulate and report without deleting |
+| `delay <seconds>` | Grace period before purging (cancelled if the member rejoins) |
+| `report content/attach <bool>` | Redact report content / attach the HTML file |
+| `retention <days>` | Auto-delete saved reports after N days (`0` = forever) |
+| `settings` | Full configuration summary |
+| `history [page]` | Recent purge events |
+| `viewreport <event_id>` | Re-send a past report |
+| `stats` | Lifetime purge counters |
+| `purge <user> [confirm]` | Manually trigger a purge |
+
+---
+
 ## Architecture
 
 ```

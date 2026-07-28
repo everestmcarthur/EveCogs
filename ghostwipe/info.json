@@ -1,0 +1,24 @@
+{
+    "author": ["everestmcarthur"],
+    "install_msg": "Thanks for installing **GhostWipe**! Use `[p]ghostwipe enable` to start, then `[p]ghostwipe logchannel #channel` to receive purge reports. Run `[p]ghostwipe settings` to see the full config, or `[p]ghostwipe dryrun true` to test it safely first.",
+    "name": "GhostWipe",
+    "short": "Auto-deletes a departing member's messages server-wide (leave/kick/ban) with a full HTML audit-log viewer.",
+    "description": "GhostWipe fires the moment a member leaves your server — whether they left on their own, were kicked, or were banned — and purges every message they ever sent across all text channels, voice channel chats, and threads (including archived ones). Every purge produces a full audit trail: a per-guild config-driven summary embed plus a self-contained, visually rich HTML report with sidebar channel switching, per-channel message counts, search, and attachment previews, so staff can review exactly what was removed. Highly configurable per-server: independently toggle whether leaves/kicks/bans trigger a purge, whitelist specific users or roles, ignore specific channels, cap or unlimit the per-channel scan depth, add a grace-period delay that auto-cancels if the member rejoins, run in dry-run/simulation mode, redact message content in reports for privacy, and set automatic report retention. Includes a manual `purge` command for backfilling a departure GhostWipe missed, plus `history` and `viewreport` to revisit past events.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "tags": [
+        "moderation",
+        "logging",
+        "purge",
+        "cleanup",
+        "audit",
+        "html",
+        "leave",
+        "kick",
+        "ban",
+        "privacy"
+    ],
+    "type": "COG",
+    "requirements": []
+}
+
