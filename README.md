@@ -178,6 +178,40 @@ Fires only on `on_member_remove` — covering voluntary leaves, kicks, and bans 
 
 ---
 
+# Affiliates
+
+**Ping-on-Join, a persistent affiliate-server board, and a separate DM-affiliates list — all in one cog.**
+
+**POJ (Ping on Join)** mentions new human members in configured channels, then auto-deletes the ping after a few seconds — enough to trigger a push notification without leaving clutter behind. **Affiliates** is a staff-configured channel holding a persistent, auto-updating plain-text board listing partner servers (name + invite), 10 per message and numbered 1..x, managed entirely through Discord UI — no raw IDs to remember, no manual message editing. **DM Affiliates** mirrors the same add/remove/list management on a completely separate list that isn't posted anywhere; instead every new member gets it as a DM the moment they join.
+
+## Feature Highlights
+
+| Category | Features |
+|----------|----------|
+| **POJ** | Multiple configurable ping channels, configurable delay (1–60s), configurable `{member}` message template |
+| **Affiliate Board** | Modal-based add (Server Name + Server Invite), select-menu + confirmation removal, always-contiguous 1..x numbering, 10 entries per plain-text message (a new message per additional 10, up to 100 total) |
+| **Persistence** | Each board page is stored by message ID and automatically recreated if deleted — survives every bot restart |
+| **DM Affiliates** | Identical add/remove/list management on a fully separate list, sent as a DM on join, independently toggleable |
+| **Access** | Management commands are admin-only; `list` previews are open to any member |
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `[p]poj enable` / `disable` | Toggle Ping on Join |
+| `[p]poj channel add/remove/list` | Channels that ping new members |
+| `[p]poj delay <seconds>` | Delete-delay for the ping |
+| `[p]poj message <template>` | Ping message template (must include `{member}`) |
+| `[p]aff channel #channel` | Set the affiliate board channel |
+| `[p]aff add` | Add an affiliate (button → modal) |
+| `[p]aff remove` | Remove an affiliate (select → confirm) |
+| `[p]aff list` | Preview the current board |
+| `[p]aff refresh` | Force-recreate the persistent message |
+| `[p]aff dm add/remove/list` | Same management, separate DM-only list |
+| `[p]aff dm enable/disable` | Toggle DMing new members the list |
+
+---
+
 # ImageVault
 
 **Auto-deletes posted images and re-hosts them in a private vault channel so they can be retrieved on request.**

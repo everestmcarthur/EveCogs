@@ -1,0 +1,22 @@
+{
+    "author": ["everestmcarthur"],
+    "install_msg": "Thanks for installing **Affiliates**! Set up POJ with `[p]poj channel add #channel` then `[p]poj enable`. Set up the affiliate board with `[p]aff channel #channel` then `[p]aff add`. DM affiliates work the same way via `[p]aff dm add`, then `[p]aff dm enable` to start sending them to new members.",
+    "name": "Affiliates",
+    "short": "Ping-on-Join, a persistent affiliate-server board, and a separate DM-affiliates list sent to new members.",
+    "description": "Affiliates bundles three related join-time features. POJ (Ping on Join) mentions new human members in configured channels then auto-deletes the ping after a configurable delay, so members get notified without cluttering chat history. The affiliate board is a staff-configured channel holding a persistent, auto-updating message listing partner servers (name + invite), numbered 1..x, managed entirely through Discord UI: `aff add` opens a modal (Server Name + Server Invite), `aff remove` opens a select menu with a confirmation step, and `aff list` previews the current entries. The board message survives bot restarts and is recreated automatically if it's ever deleted. DM Affiliates mirrors that same add/remove/list management on a completely separate list that isn't posted anywhere — instead every new member is sent it as a DM the moment they join, independently toggleable from POJ and the board.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [3, 9, 0],
+    "tags": [
+        "affiliates",
+        "welcome",
+        "join",
+        "ping",
+        "partners",
+        "advertising",
+        "modal",
+        "dm"
+    ],
+    "type": "COG",
+    "requirements": []
+}
+
