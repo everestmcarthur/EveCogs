@@ -257,8 +257,6 @@ class Affiliates(commands.Cog):
     @commands.admin_or_permissions(administrator=True)
     async def poj(self, ctx: commands.Context):
         """👋 POJ — Ping on Join: mention new members, then auto-delete the ping."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @poj.command(name="enable", aliases=["on"])
     async def poj_enable(self, ctx: commands.Context):
@@ -275,8 +273,6 @@ class Affiliates(commands.Cog):
     @poj.group(name="channel")
     async def poj_channel(self, ctx: commands.Context):
         """Manage which channels ping new members on join."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @poj_channel.command(name="add")
     async def poj_channel_add(
@@ -345,8 +341,6 @@ class Affiliates(commands.Cog):
     @commands.guild_only()
     async def aff(self, ctx: commands.Context):
         """🤝 Affiliates — the affiliate-server board and DM affiliates."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @aff.command(name="channel")
     @commands.admin_or_permissions(administrator=True)
@@ -426,8 +420,6 @@ class Affiliates(commands.Cog):
     @aff.group(name="dm")
     async def aff_dm(self, ctx: commands.Context):
         """Manage the separate DM-affiliates list, sent to new members on join."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @aff_dm.command(name="add")
     @commands.admin_or_permissions(administrator=True)

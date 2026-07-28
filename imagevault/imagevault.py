@@ -253,8 +253,6 @@ class ImageVault(commands.Cog):
         Configuration and `list` are staff-only; `show`/`get`, `mine`, and `stats`
         are open to whoever the `retrieve` permission mode allows.
         """
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @imagevault.command(name="enable", aliases=["on"])
     @commands.admin_or_permissions(administrator=True)
@@ -306,8 +304,6 @@ class ImageVault(commands.Cog):
     @commands.admin_or_permissions(administrator=True)
     async def iv_watchchannel(self, ctx: commands.Context):
         """Manage the channel watch-list. Empty list = watch every channel."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @iv_watchchannel.command(name="add")
     async def iv_watchchannel_add(
@@ -340,8 +336,6 @@ class ImageVault(commands.Cog):
     @commands.admin_or_permissions(administrator=True)
     async def iv_ignorechannel(self, ctx: commands.Context):
         """Manage channels ImageVault never touches (only applies when the watch-list is empty)."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @iv_ignorechannel.command(name="add")
     async def iv_ignorechannel_add(

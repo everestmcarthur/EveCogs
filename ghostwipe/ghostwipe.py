@@ -644,8 +644,6 @@ class GhostWipe(commands.Cog):
     @commands.admin_or_permissions(administrator=True)
     async def ghostwipe(self, ctx: commands.Context):
         """👻 GhostWipe — auto-delete a departing member's messages, with a full HTML audit log."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @ghostwipe.command(name="enable", aliases=["on"])
     async def gw_enable(self, ctx: commands.Context):
@@ -699,8 +697,6 @@ class GhostWipe(commands.Cog):
     @ghostwipe.group(name="whitelist")
     async def gw_whitelist(self, ctx: commands.Context):
         """Manage users who are never purged, no matter how they leave."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @gw_whitelist.command(name="add")
     async def gw_whitelist_add(self, ctx: commands.Context, user: discord.User):
@@ -726,8 +722,6 @@ class GhostWipe(commands.Cog):
     @ghostwipe.group(name="ignorerole")
     async def gw_ignorerole(self, ctx: commands.Context):
         """Manage roles that exempt a member from being purged."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @gw_ignorerole.command(name="add")
     async def gw_ignorerole_add(self, ctx: commands.Context, role: discord.Role):
@@ -755,8 +749,6 @@ class GhostWipe(commands.Cog):
     @ghostwipe.group(name="ignorechannel")
     async def gw_ignorechannel(self, ctx: commands.Context):
         """Manage channels/threads GhostWipe never scans."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @gw_ignorechannel.command(name="add")
     async def gw_ignorechannel_add(
@@ -835,8 +827,6 @@ class GhostWipe(commands.Cog):
     @ghostwipe.group(name="report")
     async def gw_report(self, ctx: commands.Context):
         """Configure the HTML report output."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
 
     @gw_report.command(name="content")
     async def gw_report_content(self, ctx: commands.Context, toggle: bool):
