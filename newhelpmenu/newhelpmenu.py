@@ -104,6 +104,24 @@ class NewHelpMenu(commands.Cog):
         self._settings_cache: Dict[int, Tuple[Dict, float]] = {}
         self._cache_ttl = 60.0  # Cache for 60 seconds
 
+    def _track_view(self, msg_id: int, view: "ui.LayoutView") -> None:
+        """Register a view in _active_views with automatic eviction on stop.
+
+        Every view stored here previously stayed forever: on_timeout and every
+        "close" button already call view.stop(), but nothing popped the
+        matching entry, so every single help/menu send permanently retained
+        one dict entry (holding the whole rendered page/embed list) — an
+        unbounded memory leak on any active server.
+        """
+        self._active_views[msg_id] = view
+        original_stop = view.stop
+
+        def cleanup_stop():
+            original_stop()
+            self._active_views.pop(msg_id, None)
+
+        view.stop = cleanup_stop
+
     async def cog_load(self) -> None:
         """Called when cog is loaded — set up monkey patches and replace help."""
         await self._apply_patches()
@@ -286,13 +304,7 @@ class NewHelpMenu(commands.Cog):
 
                 # Track for cleanup with automatic removal on stop
                 if msg:
-                    cog_ref._active_views[msg.id] = layout
-                    # Add cleanup callback
-                    original_stop = layout.stop
-                    def cleanup_stop():
-                        original_stop()
-                        cog_ref._active_views.pop(msg.id, None)
-                    layout.stop = cleanup_stop
+                    cog_ref._track_view(msg.id, layout)
 
                 return msg
 
@@ -373,7 +385,7 @@ class NewHelpMenu(commands.Cog):
                 )
                 msg = await destination.send(view=view)
                 view.message = msg
-                self._active_views[msg.id] = view
+                self._track_view(msg.id, view)
             else:
                 embeds, select_opts = build_bot_help_embeds(
                     ctx, self.bot, cat_data, total, accent_color=accent
@@ -399,7 +411,7 @@ class NewHelpMenu(commands.Cog):
                     for comp in components:
                         layout.add_item(comp)
                     msg = await destination.send(view=layout)
-                    self._active_views[msg.id] = layout
+                    self._track_view(msg.id, layout)
                 else:
                     embed = build_command_help_embed(ctx, data, accent_color=accent)
                     await destination.send(embed=embed)
@@ -414,7 +426,7 @@ class NewHelpMenu(commands.Cog):
                     for comp in components:
                         layout.add_item(comp)
                     msg = await destination.send(view=layout)
-                    self._active_views[msg.id] = layout
+                    self._track_view(msg.id, layout)
                 else:
                     embed = build_cog_help_embed(ctx, cog_name, cog_doc, cmds, accent_color=accent)
                     await destination.send(embed=embed)
@@ -445,7 +457,7 @@ class NewHelpMenu(commands.Cog):
                         layout = ui.LayoutView()
                         layout.add_item(container)
                         msg = await destination.send(view=layout)
-                        self._active_views[msg.id] = layout
+                        self._track_view(msg.id, layout)
                     else:
                         bot_avatar = self.bot.user.display_avatar.url if self.bot.user else None
                         embed = discord.Embed(color=discord.Colour(accent))
@@ -1024,6 +1036,7 @@ class NewHelpMenu(commands.Cog):
         await ctx.send("✅ All Components V2 settings reset to defaults (disabled).")
 
     @cv2.command(name="version")
+    @checks.admin_or_permissions(manage_guild=True)
     async def cv2_version(self, ctx: commands.Context):
         """Show the cog version."""
         await ctx.send(f"**NewHelpMenu** v{self.__version__} by {self.__author__}")
@@ -1073,5 +1086,5 @@ class NewHelpMenu(commands.Cog):
         )
         msg = await ctx.send(view=view)
         view.message = msg
-        self._active_views[msg.id] = view
+        self._track_view(msg.id, view)
         return msg

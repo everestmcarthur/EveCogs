@@ -73,14 +73,20 @@ async def gather_bot_help_data(
 
         pending_checks.append((cmd, cog_name))
 
-    # Run permission checks (this is the slow part)
-    for cmd, cog_name in pending_checks:
+    # Run permission checks concurrently — each is an independent await (often
+    # a Config lookup via Red's permission system), and with a few hundred
+    # bot commands doing them one at a time made every single [p]help call
+    # pay for that latency serially.
+    async def _safe_can_run(cmd: commands.Command) -> bool:
         try:
-            if await cmd.can_run(ctx):
-                cog_commands[cog_name].append(cmd)
+            return await cmd.can_run(ctx)
         except Exception:
-            # Permission check failed, skip this command
-            pass
+            return False
+
+    allowed_flags = await asyncio.gather(*(_safe_can_run(cmd) for cmd, _ in pending_checks))
+    for (cmd, cog_name), allowed in zip(pending_checks, allowed_flags):
+        if allowed:
+            cog_commands[cog_name].append(cmd)
 
     cog_to_category: Dict[str, str] = {}
     for cat_name, cog_list in categories.items():
@@ -124,14 +130,22 @@ async def gather_cog_help_data(
     if not cog_doc:
         cog_doc = cog.help or cog.__doc__ or "No description."
 
-    cmds = []
-    for cmd in sorted(cog.get_commands(), key=lambda c: c.qualified_name):
-        if cmd.hidden and not show_hidden:
-            continue
+    candidates = [
+        c for c in sorted(cog.get_commands(), key=lambda c: c.qualified_name)
+        if not (c.hidden and not show_hidden)
+    ]
+
+    async def _safe_can_run(cmd: commands.Command) -> bool:
         try:
-            if not await cmd.can_run(ctx):
-                continue
+            return await cmd.can_run(ctx)
         except Exception:
+            return False
+
+    allowed_flags = await asyncio.gather(*(_safe_can_run(c) for c in candidates))
+
+    cmds = []
+    for cmd, allowed in zip(candidates, allowed_flags):
+        if not allowed:
             continue
         sig = cmd.signature or ""
         short = cmd.format_shortdoc_for_context(ctx) if hasattr(cmd, "format_shortdoc_for_context") else (cmd.short_doc or "No description")
