@@ -10,6 +10,7 @@ classified via the audit log purely for reporting/toggle purposes.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -47,6 +48,8 @@ COLOUR_ERR = discord.Colour.red()
 MAX_HISTORY_ENTRIES = 50
 DISCORD_ATTACHMENT_LIMIT = 8 * 1024 * 1024  # 8MB, safe default (no boost assumptions)
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+AVATAR_MAX_BYTES = 2 * 1024 * 1024  # avatars are always small; bail if something's wrong
+AVATAR_FETCH_TIMEOUT = 5
 
 
 def _humanize_size(num_bytes: int) -> str:
@@ -176,6 +179,39 @@ class GhostWipe(commands.Cog):
             "stickers": stickers,
         }
 
+    async def _fetch_avatar_data_uri(self, url: str) -> Optional[str]:
+        """Download the member's avatar and inline it as a base64 data URI.
+
+        The report is a standalone file that may be opened offline or in a
+        viewer that blocks remote network requests, so a plain https:// URL
+        isn't reliable there. Embedding the bytes directly guarantees the
+        avatar always renders. Best-effort: returns None on any failure and
+        the report falls back to a plain initial-letter avatar.
+        """
+        if not url:
+            return None
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=AVATAR_FETCH_TIMEOUT)
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    if resp.content_length and resp.content_length > AVATAR_MAX_BYTES:
+                        return None
+                    data = await resp.content.read(AVATAR_MAX_BYTES + 1)
+                    if len(data) > AVATAR_MAX_BYTES:
+                        return None
+                    content_type = resp.content_type or "image/png"
+        except Exception:
+            LOG.debug("GhostWipe failed to download avatar for report, using fallback.", exc_info=True)
+            return None
+
+        encoded = base64.b64encode(data).decode("ascii")
+        return f"data:{content_type};base64,{encoded}"
+
     async def _gather_target_channels(
         self, guild: discord.Guild, conf: Dict[str, Any]
     ) -> List[Tuple[str, discord.abc.Messageable, str]]:
@@ -200,16 +236,19 @@ class GhostWipe(commands.Cog):
                 targets.append(("thread", th, th.name))
 
             if conf["include_archived_threads"]:
-                for ch in guild.text_channels:
-                    if ch.id in ignored:
-                        continue
+                async def _archived_for(ch: discord.TextChannel) -> List[discord.Thread]:
                     try:
-                        async for th in ch.archived_threads(limit=100):
-                            if th.id in ignored:
-                                continue
-                            targets.append(("thread", th, th.name))
+                        return [th async for th in ch.archived_threads(limit=100)]
                     except (discord.Forbidden, discord.HTTPException):
-                        continue
+                        return []
+
+                candidates = [ch for ch in guild.text_channels if ch.id not in ignored]
+                results = await asyncio.gather(*(_archived_for(ch) for ch in candidates))
+                for threads in results:
+                    for th in threads:
+                        if th.id in ignored:
+                            continue
+                        targets.append(("thread", th, th.name))
 
         return targets
 
@@ -292,6 +331,15 @@ class GhostWipe(commands.Cog):
         moderator: Optional[str] = None,
         mod_reason: Optional[str] = None,
     ) -> None:
+        event_time = datetime.now(timezone.utc)
+        placeholder_message = await self._send_placeholder_log(
+            guild, conf, member_display, member.id, member_avatar_url, reason, conf["dry_run"]
+        )
+
+        # Kick off the avatar download alongside the channel scan instead of after
+        # it — they're independent, so there's no reason to pay for both in series.
+        avatar_task = asyncio.create_task(self._fetch_avatar_data_uri(member_avatar_url))
+
         targets = await self._gather_target_channels(guild, conf)
         history_limit = conf["history_limit"]
         dry_run = conf["dry_run"]
@@ -303,7 +351,11 @@ class GhostWipe(commands.Cog):
         async def _worker(kind: str, channel: discord.abc.Messageable):
             async with semaphore:
                 result = await self._scan_channel(kind, channel, member, history_limit, dry_run)
-                if rate_delay:
+                # Only pace ourselves when a channel actually had deletions to make —
+                # there's no delete-rate-limit to protect against on a channel with
+                # zero matches, and most channels a departing member never posted in
+                # would otherwise add pure dead time to every single purge.
+                if rate_delay and not result["skipped"] and result["message_count"] > 0:
                     await asyncio.sleep(rate_delay)
                 return result
 
@@ -312,13 +364,13 @@ class GhostWipe(commands.Cog):
 
         total_deleted = sum(c["message_count"] for c in channels_data if not c["skipped"])
         event_id = f"{int(time.time())}_{member.id}"
-        event_time = datetime.now(timezone.utc)
+        avatar_data_uri = await avatar_task
 
         html = generate_report_html(
             guild_name=guild.name,
             member_name=member_display,
             member_id=member.id,
-            avatar_url=member_avatar_url,
+            avatar_data_uri=avatar_data_uri,
             reason=reason,
             event_time_str=event_time.strftime("%Y-%m-%d %H:%M:%S UTC"),
             moderator=moderator,
@@ -388,7 +440,7 @@ class GhostWipe(commands.Cog):
         await self._send_log(
             guild, conf, member_display, member.id, member_avatar_url, reason,
             moderator, mod_reason, total_deleted, channels_affected, channels_skipped,
-            dry_run, html_path, channels_data,
+            dry_run, html_path, channels_data, placeholder_message,
         )
 
     def _prune_old_reports(self, guild_id: int, keep_days: int) -> None:
@@ -402,6 +454,46 @@ class GhostWipe(commands.Cog):
                     f.unlink()
             except OSError:
                 continue
+
+    async def _send_placeholder_log(
+        self,
+        guild: discord.Guild,
+        conf: Dict[str, Any],
+        member_display: str,
+        member_id: int,
+        avatar_url: str,
+        reason: str,
+        dry_run: bool,
+    ) -> Optional[discord.Message]:
+        """Post an immediate "in progress" notice, edited later with the real results.
+
+        Scanning + purging a whole server can take a few seconds; without this,
+        the log channel sits silent that whole time with nothing to show for it.
+        """
+        channel_id = conf["log_channel"]
+        if not channel_id:
+            return None
+        log_channel = guild.get_channel(channel_id)
+        if not isinstance(log_channel, discord.TextChannel):
+            return None
+
+        title = f"👻 GhostWipe — {REASON_LABEL.get(reason, reason.title())}"
+        if dry_run:
+            title += " (Dry Run)"
+        embed = discord.Embed(
+            title=title,
+            description="🔎 Scanning the server and purging messages — results incoming...",
+            colour=REASON_COLOUR.get(reason, COLOUR_INFO),
+        )
+        embed.set_thumbnail(url=avatar_url)
+        embed.add_field(name="Member", value=f"{member_display} (`{member_id}`)", inline=True)
+        try:
+            return await log_channel.send(embed=embed)
+        except discord.HTTPException:
+            LOG.exception(
+                "Failed to send GhostWipe placeholder log to channel %s in guild %s", channel_id, guild.id
+            )
+            return None
 
     async def _send_log(
         self,
@@ -419,6 +511,7 @@ class GhostWipe(commands.Cog):
         dry_run: bool,
         html_path: Path,
         channels_data: List[Dict[str, Any]],
+        placeholder_message: Optional[discord.Message] = None,
     ) -> None:
         channel_id = conf["log_channel"]
         if not channel_id:
@@ -463,6 +556,19 @@ class GhostWipe(commands.Cog):
                     )
             except OSError:
                 pass
+
+        if placeholder_message is not None:
+            try:
+                if file_obj:
+                    await placeholder_message.edit(embed=embed, attachments=[file_obj])
+                else:
+                    await placeholder_message.edit(embed=embed)
+                return
+            except discord.HTTPException:
+                LOG.warning(
+                    "GhostWipe failed to edit its placeholder log message in guild %s, sending fresh.",
+                    guild.id,
+                )
 
         try:
             if file_obj:
