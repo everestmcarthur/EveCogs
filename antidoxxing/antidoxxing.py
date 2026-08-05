@@ -9,13 +9,17 @@ Features:
   3. Remove invisible zero-width characters
   4. Homoglyph normalization (leet -> digits)
   5. Unicode normalization and simple obfuscation replacements
-  6. Create numeric-only string by removing spaces, dots, dashes
-- Detection for IPv4, IPv6, phone, SSN, emails, and simple GPS coords.
+  6. Remove URLs and Discord mentions before detection
+- Detection for IPv4, IPv6, and simple GPS coords only.
 - Scoring: weights per detection; quarantine vs reject thresholds.
 - On reject: delete message and send a silent log to a configured moderation channel and/or a global webhook.
 - Quarantine: do not delete; send to mod channel/webhook for review.
 - Guild-level config: enabled, thresholds, whitelist roles, excluded channels, auto-action.
 - Global config: single webhook URL for all guilds.
+
+Change in this revision:
+- Removed Phone, SSN, and Email detection as requested.
+- Strip URLs before numeric extraction so webhook URLs and other links won't trigger detections.
 """
 
 import re
@@ -34,12 +38,12 @@ log = logging.getLogger("red.antidoxxing")
 
 
 class AntiDoxxing(commands.Cog):
-    """Detect and remove common doxxing attempts (IPv4, IPv6, phone, SSN, GPS, email).
+    """Detect and remove common doxxing attempts (IPv4, IPv6, GPS).
 
     Provides guild-level config and a single global webhook for modlogs.
     """
 
-    __version__ = "1.1.0"
+    __version__ = "1.2.0"
 
     def __init__(self, bot):
         self.bot = bot
@@ -108,20 +112,15 @@ class AntiDoxxing(commands.Cog):
         self._ipv6_candidate_re = re.compile(r"(?:[0-9A-Fa-f:]{2,})")
         # Candidate GPS: float pairs with a comma or whitespace separator (simple)
         self._gps_candidate_re = re.compile(r"([+-]?\d{1,3}\.\d+)[,\s]+([+-]?\d{1,3}\.\d+)")
-        # Email regex (simple and safe)
-        self._email_re = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
         # In-memory recent violation tracking: (guild_id, user_id) -> list[timestamp_seconds]
         self._violation_history: Dict[Tuple[int, int], List[float]] = {}
 
-        # Scoring weights (tuneable)
+        # Scoring weights (tuneable) - only for remaining detectors
         self._weights = {
             "IPv4": 1.0,
             "IPv6": 1.0,
             "GPS": 0.9,
-            "Phone": 0.9,
-            "SSN": 1.0,
-            "Email": 0.8,
         }
 
     # ---------- Administrative Commands ----------
@@ -348,12 +347,19 @@ class AntiDoxxing(commands.Cog):
                 lowered = lowered.replace("<@", "")
                 lowered = lowered.replace("<#", "")
 
+            # REMOVE URLs: strip http(s) URLs to avoid matching IDs inside links (e.g., webhook URLs)
+            try:
+                lowered = re.sub(r"https?://\S+", "", lowered, flags=re.IGNORECASE)
+            except re.error:
+                # fallback naive removal
+                lowered = lowered.replace("http://", "").replace("https://", "")
+
             # HOMOGLYPH NORMALIZATION: map common letters to digits for detection
             # Create a normalized copy for detection only
             normalized = lowered.translate(self._homoglyph_trans)
 
-            # STRIP SPACES & PUNCTUATION: create numeric_text used for phone/SSN detection
-            # Remove spaces, dots, and dashes (per requirements)
+            # STRIP SPACES & PUNCTUATION: create numeric_text used for detection (only for remaining detectors)
+            # Remove spaces, dots, and dashes
             numeric_text = re.sub(r"[ \\.\-]", "", normalized)
 
             # Detection: gather flags and reasons to log
@@ -411,46 +417,6 @@ class AntiDoxxing(commands.Cog):
                         detections.append(("GPS", f"{lat},{lon}"))
                         break
 
-            # PHONE detection (North American): look for 10-digit or 11-digit numbers starting with 1
-            if not any(d[0] == "Phone" for d in detections):
-                for match in re.finditer(r"\d{10,11}", numeric_text):
-                    digits = match.group(0)
-                    if len(digits) == 10:
-                        detections.append(("Phone", digits))
-                        break
-                    elif len(digits) == 11 and digits.startswith("1"):
-                        detections.append(("Phone", digits))
-                        break
-
-            # SSN detection: 9-digit sequences, exclude invalid ranges
-            if not any(d[0] == "SSN" for d in detections):
-                for match in re.finditer(r"\d{9}", numeric_text):
-                    digits = match.group(0)
-                    # Basic SSN invalid checks
-                    area = digits[:3]
-                    group = digits[3:5]
-                    serial = digits[5:9]
-                    try:
-                        area_n = int(area)
-                    except ValueError:
-                        continue
-                    # Exclude invalid starting blocks: 000, 666, 900-999
-                    if area == "000" or area == "666" or area_n >= 900:
-                        continue
-                    # Exclude group or serial all-zero
-                    if group == "00" or serial == "0000":
-                        continue
-                    # Looks like a valid SSN
-                    detections.append(("SSN", digits))
-                    break
-
-            # EMAIL detection
-            if not any(d[0] == "Email" for d in detections):
-                for match in self._email_re.finditer(normalized):
-                    addr = match.group(0)
-                    detections.append(("Email", addr))
-                    break
-
             # If nothing detected, return
             if not detections:
                 return
@@ -459,8 +425,6 @@ class AntiDoxxing(commands.Cog):
             score = 0.0
             for dtype, _ in detections:
                 score += self._weights.get(dtype, 0.5)
-            # Normalize score (simple): divide by max possible weight (sum of weights of detected types but cap)
-            # For decision we compare raw score vs thresholds tuned to these weights
 
             # Decide action based on thresholds
             if score >= reject_threshold:
