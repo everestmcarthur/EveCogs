@@ -1,4 +1,11 @@
-"""Moderation commands — ban, unban, mute, unmute, purge, mod edit/delete, warnings."""
+"""
+Moderation commands — ban, unban, mute, unmute, purge, mod edit/delete, warnings.
+
+Updated purge command: treat `count` as a TOTAL across the network by default;
+add optional per-channel mode, dry-run simulation, per-channel breakdown in the
+mod log, and improved audit details. Uses per-network `mod_webhook` if set via
+network config, otherwise falls back to existing `log_channel` behaviour.
+"""
 
 from __future__ import annotations
 
@@ -136,8 +143,6 @@ class ModerationCommands(WormholeBase):
         await self._audit(name, "unmuteserver", str(ctx.author), str(guild_id))
         await self._log(nd, info_embed(f"✅ Server `{guild_id}` unmuted by {ctx.author}", title="⚙️ Mod Action"))
 
-    # ── Allowlist ──────────────────────────────────────────────────────────
-
     @WormholeBase.wh_mod.command(name="allowserver")
     @requires_role(Role.ADMIN)
     async def wh_mod_allowserver(self, ctx: commands.Context, name: str, guild_id: int) -> None:
@@ -164,34 +169,80 @@ class ModerationCommands(WormholeBase):
         await self._audit(name, "removeallow", str(ctx.author), str(guild_id))
         await self._log(nd, info_embed(f"Server `{guild_id}` removed from allowlist by {ctx.author}", title="⚙️ Mod Action"))
 
-    # ── Purge ──────────────────────────────────────────────────────────────
+    # ── Purge ──────────────────────────────────────────────────────────
 
     @WormholeBase.wh_mod.command(name="purge")
     @requires_role(Role.MODERATOR)
-    async def wh_mod_purge(self, ctx: commands.Context, name: str, count: int = 10) -> None:
-        """Purge recent relayed messages across all channels (max 50)."""
+    async def wh_mod_purge(self, ctx: commands.Context, name: str, count: int = 10, per_channel: bool = False, dry_run: bool = False) -> None:
+        """Purge recent relayed messages across all channels.
+
+        By default `count` is treated as a TOTAL across the network. Set
+        `per_channel=True` to retain legacy per-channel behaviour.
+        Use `dry_run=True` to simulate without deleting.
+        """
         nd = await self._net(name)
         if not nd:
             return await ctx.send(embed=err_embed(f"Network `{name}` not found."))
-        count = min(count, 50)
-        deleted = 0
+        requested = max(0, min(count, 50))
+
+        total_deleted = 0
+        per_channel_report = []  # list of (channel_id, attempted, deleted, failed)
+
+        # Iterate channels; if not per_channel, stop when total_deleted >= requested
         for ch_id in nd.get("channels", []):
+            if not per_channel and total_deleted >= requested:
+                break
             ch = self.bot.get_channel(ch_id)
             if not ch:
                 continue
+            attempted = 0
+            deleted_here = 0
+            failed = 0
+            # Limit per-channel iteration to `requested` to avoid heavy scans
             try:
-                async for msg in ch.history(limit=count):
+                async for msg in ch.history(limit=requested):
                     if msg.author.id == self.bot.user.id or (msg.webhook_id is not None):
+                        attempted += 1
+                        if dry_run:
+                            # simulate - don't delete
+                            continue
                         try:
                             await msg.delete()
-                            deleted += 1
+                            deleted_here += 1
+                            total_deleted += 1
                         except Exception:
-                            pass
+                            failed += 1
+                        # If honoring total cap, break when reached
+                        if not per_channel and total_deleted >= requested:
+                            break
             except Exception:
-                pass
-        await ctx.send(embed=ok_embed(f"Purged {deleted} relayed messages across `{name}`."))
-        await self._audit(name, "purge", str(ctx.author), details=f"count={count}")
-        await self._log(nd, warn_embed(f"🧹 **{deleted}** messages purged in `{name}` by {ctx.author} (requested {count})"))
+                # log and continue
+                try:
+                    log = getattr(self, "log", None)
+                    if log:
+                        log.exception("Error scanning channel %s during purge", ch_id)
+                except Exception:
+                    pass
+            per_channel_report.append((ch_id, attempted, deleted_here, failed))
+
+        # Build a concise human-friendly report
+        lines = []
+        for ch_id, attempted, deleted_here, failed in per_channel_report:
+            ch = self.bot.get_channel(ch_id)
+            name_str = f"#{ch.name}" if ch else f"<unknown {ch_id}>"
+            lines.append(f"• {name_str}: attempted {attempted}, deleted {deleted_here}, failed {failed}")
+
+        summary = f"Purged {total_deleted} relayed messages across `{name}` (requested {requested})" if not dry_run else f"Dry-run: {sum(p[1] for p in per_channel_report)} relayed messages would be affected across `{name}` (requested {requested})"
+        await ctx.send(embed=ok_embed(summary))
+
+        # Audit and network log with details
+        details = f"requested={requested} total_deleted={total_deleted} per_channel={len(per_channel_report)}"
+        await self._audit(name, "purge", str(ctx.author), details=details)
+
+        # Use the existing _log helper to send a network-visible message; include breakdown
+        breakdown = "\n".join(lines)[:1900] or "No relayed messages found."
+        title = f"🧹 Purge{' (dry-run)' if dry_run else ''}: {total_deleted}/{requested}"
+        await self._log(nd, warn_embed(f"{title} by {ctx.author}\n\n{breakdown}"))
 
     # ── Cross-network mod edit/delete ──────────────────────────────────────
 
