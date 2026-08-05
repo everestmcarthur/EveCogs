@@ -10,6 +10,7 @@ from redbot.core import commands
 from ..models.permissions import Role, requires_role, has_role
 from ..utils import ok_embed, err_embed, info_embed, warn_embed, truncate, COLOUR_INFO
 from ._base import WormholeBase
+from ..ui.views import ReportActionView
 
 
 class ReportCommands(WormholeBase):
@@ -57,13 +58,13 @@ class ReportCommands(WormholeBase):
             nd["report_counter"] = report_id
 
         await ctx.send(embed=ok_embed(f"Report #{report_id} submitted. Staff will review it."), delete_after=10)
-        await self._log(nd, warn_embed(
-            f"🚩 **Report #{report_id}**\n"
-            f"Reporter: {ctx.author} (`{ctx.author.id}`)\n"
-            f"Message ID: `{message_id}`\n"
-            f"Reason: {reason}",
-            title="New Report",
-        ))
+
+        # Send to configured report channel (if set) with action buttons
+        try:
+            nd_full = await self._net(net_name)
+            await self._notify_report_channel(nd_full, net_name, report)
+        except Exception:
+            pass
 
     @WormholeBase.wh_report.command(name="list")
     @requires_role(Role.HELPER)
@@ -135,26 +136,108 @@ class ReportCommands(WormholeBase):
                     r["resolved"] = True
                     r["resolved_by"] = ctx.author.id
                     r["resolution"] = resolution
-                    r["resolved_at"] = datetime.now(timezone.utc).isoformat()
                     break
-            else:
-                return await ctx.send(embed=err_embed(f"Report #{report_id} not found."))
-        await ctx.send(embed=ok_embed(f"Report #{report_id} resolved."))
-        await self._audit(name, "report_resolve", str(ctx.author), str(report_id), resolution)
+        await ctx.send(embed=ok_embed(f"Report #{report_id} marked resolved."))
 
-    @WormholeBase.wh_report.command(name="dismiss")
-    @requires_role(Role.MODERATOR)
-    async def wh_report_dismiss(self, ctx: commands.Context, name: str, report_id: int, *, reason: str = "Dismissed") -> None:
-        """Dismiss a report."""
+    @WormholeBase.wh_report.command(name="channel")
+    @requires_role(Role.ADMIN)
+    async def wh_report_set_channel(self, ctx: commands.Context, name: str, channel: discord.TextChannel | None = None) -> None:
+        """Set the channel where reports are posted (for staff). Pass no channel to clear."""
+        nd = await self._net(name)
+        if not nd:
+            return await ctx.send(embed=err_embed(f"Network `{name}` not found."))
         async with self.config.networks() as ns:
-            for r in ns[name].get("reports", []):
-                if r.get("id") == report_id:
-                    r["resolved"] = True
-                    r["resolved_by"] = ctx.author.id
-                    r["resolution"] = f"Dismissed: {reason}"
-                    r["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            ns[name]["report_channel"] = channel.id if channel else None
+        await ctx.send(embed=ok_embed(f"Report channel {'set' if channel else 'cleared'} for `{name}`."))
+
+    # Helper used by both commands and the ReportModal to notify staff
+    async def _notify_report_channel(self, nd: dict, net_name: str, report: dict) -> None:
+        ch_id = nd.get("report_channel")
+        em = discord.Embed(
+            title=f"🚩 Report #{report['id']} — {net_name}",
+            description=(
+                f"Reporter: <@{report['reporter_id']}> (`{report['reporter_id']}`)\n"
+                f"Author: <@{report['author_id']}> (`{report.get('author_id')}`)\n"
+                f"Channel: <#{report['channel_id']}>\n"
+                f"Reason: {truncate(report.get('reason', ''), 300)}"
+            ),
+            colour=COLOUR_INFO,
+            timestamp=datetime.fromisoformat(report['timestamp']),
+        )
+        if report.get('content_preview'):
+            em.add_field(name="Content Preview", value=truncate(report['content_preview'], 1024), inline=False)
+        if report.get('jump_url'):
+            em.add_field(name="Jump", value=f"[Jump to message]({report['jump_url']})", inline=True)
+
+        # DM owner as a courtesy
+        try:
+            owner = self.bot.get_user(nd.get('owner_id'))
+            if owner:
+                await owner.send(embed=warn_embed(
+                    f"**Report #{report['id']}** in `{net_name}`\n"
+                    f"Reporter: <@{report['reporter_id']}> (`{report['reporter_id']}`)\n"
+                    f"Author: <@{report.get('author_id')}> (`{report.get('author_id')}`)\n"
+                    f"Reason: {truncate(report.get('reason',''),200)}",
+                    title="🚩 New Report",
+                ))
+        except discord.Forbidden:
+            pass
+
+        if not ch_id:
+            return
+        ch = self.bot.get_channel(ch_id)
+        if not ch:
+            return
+        view = ReportActionView(self, net_name, report['id'], jump_url=report.get('jump_url'))
+        try:
+            await ch.send(embed=em, view=view)
+        except Exception:
+            pass
+
+    # Interaction handlers invoked by ReportActionView
+    async def _report_resolve_via_interaction(self, interaction: discord.Interaction, net_name: str, report_id: int) -> None:
+        nd = await self._net(net_name)
+        if not nd:
+            return await interaction.response.send_message("Network not found.", ephemeral=True)
+        if not has_role(nd, interaction.user.id, Role.MODERATOR) and not await self.bot.is_owner(interaction.user):
+            return await interaction.response.send_message("You need Moderator role or higher.", ephemeral=True)
+        # update report
+        async with self.config.networks() as ns:
+            for r in ns[net_name].get('reports', []):
+                if r.get('id') == report_id:
+                    r['resolved'] = True
+                    r['resolved_by'] = interaction.user.id
+                    r['resolution'] = 'Resolved via report button'
                     break
-            else:
-                return await ctx.send(embed=err_embed(f"Report #{report_id} not found."))
-        await ctx.send(embed=ok_embed(f"Report #{report_id} dismissed."))
-        await self._audit(name, "report_dismiss", str(ctx.author), str(report_id), reason)
+        # Edit the original message to indicate resolved
+        try:
+            em = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
+            if em:
+                em.set_footer(text=f"Resolved by {interaction.user}")
+                await interaction.message.edit(embed=em, view=None)
+        except Exception:
+            pass
+        await interaction.response.send_message(embed=ok_embed(f"Report #{report_id} marked resolved."), ephemeral=True)
+
+    async def _report_dismiss_via_interaction(self, interaction: discord.Interaction, net_name: str, report_id: int) -> None:
+        nd = await self._net(net_name)
+        if not nd:
+            return await interaction.response.send_message("Network not found.", ephemeral=True)
+        if not has_role(nd, interaction.user.id, Role.MODERATOR) and not await self.bot.is_owner(interaction.user):
+            return await interaction.response.send_message("You need Moderator role or higher.", ephemeral=True)
+        async with self.config.networks() as ns:
+            for r in ns[net_name].get('reports', []):
+                if r.get('id') == report_id:
+                    r['resolved'] = True
+                    r['resolved_by'] = interaction.user.id
+                    r['resolution'] = 'Dismissed'
+                    break
+        try:
+            em = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
+            if em:
+                em.colour = 0x2ECC71
+                em.set_footer(text=f"Dismissed by {interaction.user}")
+                await interaction.message.edit(embed=em, view=None)
+        except Exception:
+            pass
+        await interaction.response.send_message(embed=ok_embed(f"Report #{report_id} dismissed."), ephemeral=True)

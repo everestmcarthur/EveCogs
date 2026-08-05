@@ -72,6 +72,13 @@ class ReportModal(discord.ui.Modal, title="Report Message"):
             except discord.Forbidden:
                 pass
 
+        # Notify configured report channel with action buttons
+        try:
+            nd_full = await self.cog._net(self.net_name)
+            await self.cog._notify_report_channel(nd_full, self.net_name, report)
+        except Exception:
+            pass
+
         await interaction.response.send_message(
             embed=ok_embed(f"Report #{report_id} submitted. Staff will review it."),
             ephemeral=True,
