@@ -13,10 +13,10 @@ DEFAULT_NETWORK: dict = {
     "staff": {},                    # {user_id_str: Role int}  (new hierarchy)
     "staff_ids": [],                # LEGACY — flat list, migrated on read
 
-    # ── Channels ───────────────────────────────────────────────────────────
+    # ── Channels ──────────────────────────────────────────────────────────[...]
     "channels": [],
 
-    # ── Identity ───────────────────────────────────────────────────────────
+    # ── Identity ──────────────────────────────────────────────────────────[...]
     "use_webhooks": True,
     "relay_mode": "webhook",        # webhook | embed | compact
     "image_mode": "user",           # user | server | custom
@@ -52,14 +52,14 @@ DEFAULT_NETWORK: dict = {
     "rate_limit_rate": 5,
     "rate_limit_per": 10.0,
 
-    # ── Logging ────────────────────────────────────────────────────────────
+    # ── Logging ──────────────────────────────────────────────────────────[...]
     "log_channel": None,
     "report_channel": None,
 
     # ── Server nicknames ───────────────────────────────────────────────────
     "server_nicknames": {},
 
-    # ── Stats ─────────────────────────────────────────────────────────────
+    # ── Stats ───────────────────────────────────────────────────────────[...]
     "total_messages": 0,
     "created_at": None,
 
@@ -86,7 +86,160 @@ DEFAULT_NETWORK: dict = {
         "raid_threshold": 10,
     },
 
-    # ── Invites ────────────────────────────────────────────────────────────
+    # ── Invites ──────────────────────────────────────────────────────────[...]
     "invites": {},
     "vanity_invite": None,
+
+    # ── Portal / welcome ───────────────────────────────────────────────────
+    "portal_messages": {},
+    "welcome_message": "",
+
+    # ── Mention control (legacy) ───────────────────────────────────────────
+    "mention_control": {
+        "strip_everyone": True,
+        "strip_role_mentions": False,
+        "strip_user_mentions": False,
+    },
+
+    # ── User profiles ──────────────────────────────────────────────────────
+    "user_profiles": {},
+    "blackout_schedules": [],
+
+    # ── DM relay ─────────────────────────────────────────────────────────[...]
+    "dm_enabled": False,
+    "dm_subscribers": [],
+    "dm_relay_mode": "embed",       # embed | compact | plain
+
+    # ── Starboard ─────────────────────────────────────────────────────────[...]
+    "starboard_enabled": False,
+    "starboard_channel": None,
+    "starboard_threshold": 3,
+    "starred_messages": {},
+
+    # ── Audit log ─────────────────────────────────────────────────────────[...]
+    "audit_log": [],
+
+    # ── Attachment filters ─────────────────────────────────────────────────
+    "blocked_extensions": [],
+    "max_filesize": None,
+
+    # ── Karma ──────────────────────────────────────────────────────────[...]
+    "karma_enabled": False,
+    "karma_emoji": "👍",
+    "karma_scores": {},
+    "karma_penalties": {},
+
+    # ── MOTD / Rules ───────────────────────────────────────────────────────
+    "motd": "",
+    "rules": "",
+
+    # ── Relay delay ────────────────────────────────────────────────────────
+    "relay_delay": 0,
+
+    # ── Highlights ─────────────────────────────────────────────────--------
+    "highlights": {},
+
+    # ── Network roles (legacy, unused) ─────────────────────────────────────
+    "roles": {},
+
+    # ── Per-channel overrides ──────────────────────────────────────────────
+    "channel_overrides": {},
+
+    # ── Scheduled messages ─────────────────────────────────────────────────
+    "scheduled_messages": [],
+
+    # ── Slowmode ─────────────────────────────────────────────────────────[...]
+    "slowmode": 0,
+
+    # ── Discovery ─────────────────────────────────────────────────────────[...]
+    "public": False,
+    "tags": [],
+
+    # ── Typing indicator relay ─────────────────────────────────────────────
+    "sync_typing": False,
+
+    # ── Anonymous mode ─────────────────────────────────────────────────────
+    "anonymous": False,
+    "anon_salt": "",
+
+    # ── Mirror channels ────────────────────────────────────────────────────
+    "mirror_channels": [],
+
+    # ── Ephemeral messages ─────────────────────────────────────────────────
+    "ephemeral_delay": 0,
+
+    # ── Auto-responses ─────────────────────────────────────────────────────
+    "auto_responses": {},
+
+    # ── Media-only mode ────────────────────────────────────────────────────
+    "media_only": False,
+
+    # ── Analytics ─────────────────────────────────────────────────────────[...]
+    "analytics": {
+        "hourly": {},
+        "top_users": {},
+    },
+
+    # ── Health ──────────────────────────────────────────────────────────[...]
+    "last_health_check": None,
+    "unhealthy_channels": [],
+
+    # ── Polls ──────────────────────────────────────────────────────────[...]
+    "active_polls": {},
+
+    # ── AFK system ─────────────────────────────────────────────────--------
+    "afk_users": {},
+
+    # ── Personal ignore list ───────────────────────────────────────────────
+    "user_ignores": {},
+
+    # ── User colours ───────────────────────────────────────────────────────
+    "user_colours": {},
+
+    # ── Quiet hours ────────────────────────────────────────────────────────
+    "quiet_hours": {},
+
+    # ── Network bridging ───────────────────────────────────────────────────
+    "bridge_from": [],
+    "bridge_to": [],
+
+    # ── Granular mention policy ────────────────────────────────────────────
+    "mention_policy": {
+        "allow_user_mentions": False,
+        "allow_role_mentions": False,
+        "allow_everyone": False,
+        "allow_here": False,
+    },
+    "server_mention_overrides": {},
+    "mention_exempt_users": [],
+    "mention_optout_users": [],
+
+    # ── ToS acceptance gate ────────────────────────────────────────────────
+    "rules_required": False,
+    "rules_text": "",
+    "rules_accepted": {},
+
+    # ── Report system ──────────────────────────────────────────────────────
+    "reports": [],
+    "report_counter": 0,
+
+    # ── Action presets & history ───────────────────────────────────────────
+    "action_presets": {
+        "warn": {"karma_delta": -1, "retain_days": 90, "dm_message": "You have received a warning from staff."},
+        "timeout": {"seconds": 60 * 60, "karma_delta": -2, "retain_days": 90},
+        "ban": {"days": 0, "karma_delta": -10, "retain_days": 90},
+    },
+    "action_history": {},
 }
+
+
+DEFAULT_GLOBAL: dict = {
+    "networks": {},
+    "max_networks_per_user": 10,
+    "global_banned_users": [],
+    "global_banned_servers": [],
+    "bookmarks": {},
+}
+
+
+MAP_LIMIT: int = 2_000
