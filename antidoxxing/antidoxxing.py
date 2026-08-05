@@ -1,25 +1,14 @@
 """
-AntiDoxxing Red Cog
+AntiDoxxing Red Cog — configurable, safe defaults
 
-Features:
-- Listens to on_message and on_message_edit.
-- Sanitization pipeline:
-  1. Ignore bots
-  2. Strip Discord markdown characters
-  3. Remove invisible zero-width characters
-  4. Homoglyph normalization (leet -> digits)
-  5. Unicode normalization and simple obfuscation replacements
-  6. Remove URLs and Discord mentions before detection
-- Detection for IPv4, IPv6, and simple GPS coords only.
-- Scoring: weights per detection; quarantine vs reject thresholds.
-- On reject: delete message and send a silent log to a configured moderation channel and/or a global webhook.
-- Quarantine: do not delete; send to mod channel/webhook for review.
-- Guild-level config: enabled, thresholds, whitelist roles, excluded channels, auto-action.
-- Global config: single webhook URL for all guilds.
+This revision adds full guild-level configuration for detectors, thresholds,
+whitelist/exclusions, auto-action escalation settings, and optional global
+webhook logging. Defaults are conservative: cog is enabled by default but
+phone/SSN/email detectors are off to avoid false positives. Immediate
+`reject` action deletes the offending message; auto-actions (escalation)
+are disabled by default (action="none").
 
-Change in this revision:
-- Removed Phone, SSN, and Email detection as requested.
-- Strip URLs before numeric extraction so webhook URLs and other links won't trigger detections.
+Admin commands added for runtime configuration.
 """
 
 import re
@@ -38,38 +27,44 @@ log = logging.getLogger("red.antidoxxing")
 
 
 class AntiDoxxing(commands.Cog):
-    """Detect and remove common doxxing attempts (IPv4, IPv6, GPS).
+    """Detect and remove/doquarantine common doxxing attempts.
 
-    Provides guild-level config and a single global webhook for modlogs.
+    Configurable per-guild and with a single optional global webhook for
+    moderator logs.
     """
 
-    __version__ = "1.2.0"
+    __version__ = "1.0.0"
 
     def __init__(self, bot):
         self.bot = bot
-        # Unique identifier for Config; change if you fork to avoid collisions
         self.config = Config.get_conf(self, identifier=1234567890123, force_registration=True)
 
-        # Global config (one webhook for all guilds)
+        # Global options
         self.config.register_global(webhook_url=None)
 
-        # Guild-specific config
+        # Guild defaults — conservative and safe
         self.config.register_guild(
             mod_channel=None,
             enabled=True,
             filter_level="high",  # low|medium|high|paranoid
             quarantine_threshold=0.6,
             reject_threshold=0.85,
+            detect_phone=False,
+            detect_ssn=False,
+            detect_email=False,
+            detect_ipv4_candidates=False,
+            ignore_code_blocks=True,
+            strip_mentions=True,
+            strip_urls=True,
             whitelist_role_ids=[],
             excluded_channel_ids=[],
-            auto_action={"violations": 3, "interval_minutes": 60, "action": "temp_ban_24h"},
+            blocklist_regex_path=None,
+            auto_action={"violations": 3, "interval_minutes": 60, "action": "none"},
+            log_raw_message=False,
         )
 
-        # Precompute translation maps and regex candidates
-        # Characters to strip for discord markdown formatting
+        # Sanitization helpers
         self._markdown_strip_trans = str.maketrans("", "", "`*_~|>")
-
-        # Zero-width and invisible characters to remove
         self._invisible_chars = {
             "\u200B": "",
             "\u200C": "",
@@ -78,7 +73,7 @@ class AntiDoxxing(commands.Cog):
             "\u2060": "",
         }
 
-        # Homoglyph (leet/homoglyph) mapping: letters -> digits (both cases)
+        # Basic homoglyph map (keeps hex letters intact to avoid breaking IPv6)
         homoglyph_pairs = {
             "o": "0",
             "O": "0",
@@ -105,66 +100,78 @@ class AntiDoxxing(commands.Cog):
         }
         self._homoglyph_trans = {ord(k): v for k, v in homoglyph_pairs.items()}
 
-        # Regexes to find candidate sequences (kept small/simple to avoid ReDoS)
-        # Candidate IPv4-like sequences: digits separated by ., -, or whitespace (at least 3 separators)
+        # Candidate regexes (kept conservative to avoid ReDoS)
         self._ipv4_candidate_re = re.compile(r"(?:\d{1,3}(?:[.\-\s]?)){3}\d{1,3}")
-        # Candidate IPv6-like candidate: contains colon and hex characters
         self._ipv6_candidate_re = re.compile(r"(?:[0-9A-Fa-f:]{2,})")
-        # Candidate GPS: float pairs with a comma or whitespace separator (simple)
         self._gps_candidate_re = re.compile(r"([+-]?\d{1,3}\.\d+)[,\s]+([+-]?\d{1,3}\.\d+)")
+        self._email_re = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
-        # In-memory recent violation tracking: (guild_id, user_id) -> list[timestamp_seconds]
+        # In-memory escalation tracking (best-effort)
         self._violation_history: Dict[Tuple[int, int], List[float]] = {}
 
-        # Scoring weights (tuneable) - only for remaining detectors
-        self._weights = {
-            "IPv4": 1.0,
-            "IPv6": 1.0,
-            "GPS": 0.9,
-        }
+        # Weights for simple scoring (only used if multiple detectors enabled)
+        self._weights = {"IPv4": 1.0, "IPv6": 1.0, "GPS": 0.9, "Phone": 0.9, "SSN": 1.0, "Email": 0.8}
 
-    # ---------- Administrative Commands ----------
+    # ------------------ Admin commands ------------------
     @checks.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     @commands.command(name="setmodchannel", help="Set the moderation channel for antidoxxing logs. Use without args to unset.")
     async def setmodchannel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
-        """Set or unset the moderation channel where silent logs are posted."""
         guild = ctx.guild
         if channel is None:
             await self.config.guild(guild).mod_channel.set(None)
-            await ctx.send("AntiDoxxing moderation channel unset. Logs will not be posted to a channel.")
+            await ctx.send("AntiDoxxing moderation channel unset.")
             return
-        # Save channel ID
         await self.config.guild(guild).mod_channel.set(channel.id)
         await ctx.send(f"AntiDoxxing moderation channel set to #{channel.name} (ID: {channel.id}).")
-
-    @commands.guild_only()
-    @commands.command(name="showmodchannel", help="Show configured moderation channel for antidoxxing logs.")
-    async def showmodchannel(self, ctx: commands.Context):
-        """Show the current moderation channel setting."""
-        guild = ctx.guild
-        channel_id = await self.config.guild(guild).mod_channel()
-        if channel_id:
-            ch = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
-            if ch:
-                await ctx.send(f"AntiDoxxing logs go to #{ch.name} (ID: {channel_id}).")
-                return
-            # channel not found
-            await ctx.send(f"Configured moderation channel ID {channel_id} not found in this bot's cache.")
-            return
-        await ctx.send("No moderation channel configured for AntiDoxxing.")
 
     @checks.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     @commands.command(name="setenabled", help="Enable or disable AntiDoxxing in this guild.")
     async def setenabled(self, ctx: commands.Context, enabled: bool):
-        guild = ctx.guild
-        await self.config.guild(guild).enabled.set(bool(enabled))
+        await self.config.guild(ctx.guild).enabled.set(bool(enabled))
         await ctx.send(f"AntiDoxxing enabled set to {enabled} for this guild.")
 
     @checks.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
-    @commands.command(name="addwhitelistrole", help="Add a role to the Antidoxxing whitelist (bypasses checks).")
+    @commands.command(name="setthresholds", help="Set quarantine and reject thresholds (floats 0-1).")
+    async def setthresholds(self, ctx: commands.Context, quarantine: float, reject: float):
+        if not (0.0 <= quarantine < reject <= 1.0):
+            return await ctx.send("Invalid thresholds — require 0.0 <= quarantine < reject <= 1.0")
+        async with self.config.guild(ctx.guild).all() as cfg:
+            cfg["quarantine_threshold"] = quarantine
+            cfg["reject_threshold"] = reject
+        await ctx.send(f"Thresholds set: quarantine={quarantine}, reject={reject}")
+
+    @checks.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    @commands.command(name="setdetector", help="Enable/disable a detector: phone|ssn|email|ipv4_candidates")
+    async def setdetector(self, ctx: commands.Context, detector: str, enabled: bool):
+        detector = detector.lower()
+        if detector not in ("phone", "ssn", "email", "ipv4_candidates"):
+            return await ctx.send("Unknown detector. Valid: phone, ssn, email, ipv4_candidates")
+        key = {
+            "phone": "detect_phone",
+            "ssn": "detect_ssn",
+            "email": "detect_email",
+            "ipv4_candidates": "detect_ipv4_candidates",
+        }[detector]
+        await self.config.guild(ctx.guild).set_raw(key).set(enabled) if False else await self.config.guild(ctx.guild).__getattribute__(key).set(enabled)
+        await ctx.send(f"Detector {detector} set to {enabled}.")
+
+    @checks.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    @commands.command(name="setautoaction", help="Configure auto-action: violations interval_minutes action (action = none|kick|ban|temp_ban_24h)")
+    async def setautoaction(self, ctx: commands.Context, violations: int, interval_minutes: int, action: str):
+        if violations < 1 or interval_minutes < 1:
+            return await ctx.send("violations and interval_minutes must be >= 1")
+        async with self.config.guild(ctx.guild).all() as cfg:
+            cfg["auto_action"] = {"violations": violations, "interval_minutes": interval_minutes, "action": action}
+        await ctx.send(f"Auto-action set: {violations} violations in {interval_minutes}m -> {action}")
+
+    @checks.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    @commands.command(name="addwhitelistrole", help="Add a role to the AntiDoxxing whitelist (bypasses checks).")
     async def addwhitelistrole(self, ctx: commands.Context, role: discord.Role):
         guild = ctx.guild
         current = await self.config.guild(guild).whitelist_role_ids()
@@ -177,7 +184,7 @@ class AntiDoxxing(commands.Cog):
 
     @checks.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
-    @commands.command(name="removewhitelistrole", help="Remove a role from the Antidoxxing whitelist.")
+    @commands.command(name="removewhitelistrole", help="Remove a role from the AntiDoxxing whitelist.")
     async def removewhitelistrole(self, ctx: commands.Context, role: discord.Role):
         guild = ctx.guild
         current = await self.config.guild(guild).whitelist_role_ids()
@@ -190,25 +197,7 @@ class AntiDoxxing(commands.Cog):
 
     @checks.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
-    @commands.command(name="listexcludedchannels", help="List channels excluded from Antidoxxing.")
-    async def listexcludedchannels(self, ctx: commands.Context):
-        guild = ctx.guild
-        current = await self.config.guild(guild).excluded_channel_ids()
-        if not current:
-            await ctx.send("No channels excluded.")
-            return
-        lines = []
-        for cid in current:
-            ch = guild.get_channel(cid) or self.bot.get_channel(cid)
-            if ch:
-                lines.append(f"- {ch.name} (ID: {cid})")
-            else:
-                lines.append(f"- Unknown channel ID: {cid}")
-        await ctx.send("Excluded channels:\n" + "\n".join(lines))
-
-    @checks.admin_or_permissions(manage_guild=True)
-    @commands.guild_only()
-    @commands.command(name="addexcludedchannel", help="Add a channel to the exclusion list for Antidoxxing.")
+    @commands.command(name="addexcludedchannel", help="Add a channel to the exclusion list for AntiDoxxing.")
     async def addexcludedchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         guild = ctx.guild
         current = await self.config.guild(guild).excluded_channel_ids()
@@ -232,7 +221,7 @@ class AntiDoxxing(commands.Cog):
         await self.config.guild(guild).excluded_channel_ids.set(current)
         await ctx.send(f"Channel #{channel.name} removed from exclusion list.")
 
-    # Global webhook setter - bot owner only
+    # Bot-owner: global webhook for modlogs
     @checks.is_owner()
     @commands.command(name="setmodwebhook", help="Set a global webhook URL for AntiDoxxing modlogs. Use without args to unset.")
     async def setmodwebhook(self, ctx: commands.Context, webhook_url: Optional[str] = None):
@@ -243,159 +232,102 @@ class AntiDoxxing(commands.Cog):
         await self.config.webhook_url.set(webhook_url)
         await ctx.send("AntiDoxxing global webhook set.")
 
-    @checks.is_owner()
-    @commands.command(name="showmodwebhook", help="Show configured global webhook URL for AntiDoxxing (bot owner only).")
-    async def showmodwebhook(self, ctx: commands.Context):
-        url = await self.config.webhook_url()
-        if url:
-            await ctx.send(f"Global AntiDoxxing webhook: {url}")
-        else:
-            await ctx.send("No global webhook configured.")
-
-    # ---------- Listeners ----------
+    # ------------------ Listeners ------------------
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Process new messages."""
         await self._process_message(message)
 
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        """Process edited messages (checks the edited content)."""
-        # Only process if the content actually changed
         if before.content == after.content:
             return
         await self._process_message(after)
 
-    # ---------- Core processing ----------
+    # ------------------ Core pipeline ------------------
     async def _process_message(self, message: discord.Message):
-        """Full pipeline: sanitize -> detect -> action."""
         try:
-            # 1) IGNORE BOTS: Skip messages from any bot, including ourselves
             if message.author.bot:
                 return
-
-            # Prefer to only operate in guilds (server messages)
             if message.guild is None:
                 return
 
             guild = message.guild
+            cfg = await self.config.guild(guild).all()
 
-            # Load guild config early for short-circuit
-            guild_cfg = await self.config.guild(guild).all()
-            enabled = guild_cfg.get("enabled", True)
-            excluded_channels = guild_cfg.get("excluded_channel_ids", []) or []
-            whitelist_roles = set(guild_cfg.get("whitelist_role_ids", []) or [])
-            mod_channel_id = guild_cfg.get("mod_channel")
-            quarantine_threshold = guild_cfg.get("quarantine_threshold", 0.6)
-            reject_threshold = guild_cfg.get("reject_threshold", 0.85)
-            auto_action_cfg = guild_cfg.get("auto_action", {"violations": 3, "interval_minutes": 60, "action": "temp_ban_24h"})
-
-            if not enabled:
+            if not cfg.get("enabled", True):
                 return
 
-            # Excluded channels
-            if message.channel.id in excluded_channels:
+            if message.channel.id in (cfg.get("excluded_channel_ids") or []):
                 return
 
-            # Whitelisted roles
-            author_role_ids = {r.id for r in getattr(message.author, "roles", [])}
-            if whitelist_roles & author_role_ids:
+            author_roles = {r.id for r in getattr(message.author, "roles", [])}
+            if set(cfg.get("whitelist_role_ids", [])) & author_roles:
                 return
 
             raw = message.content or ""
             if not raw:
                 return
 
-            # SANITIZE MARKDOWN: remove common markdown characters used to obfuscate content
+            # Basic sanitization
             sanitized = raw.translate(self._markdown_strip_trans)
-
-            # SANITIZE INVISIBLE CHARACTERS
-            # Replace listed invisible characters with empty string
             for ch, repl in self._invisible_chars.items():
                 if ch in sanitized:
                     sanitized = sanitized.replace(ch, repl)
-
-            # UNICODE NORMALIZATION
             sanitized = unicodedata.normalize("NFKC", sanitized)
 
-            # SIMPLE OBFS NORMALIZATION: common human obfuscations -> canonical
-            lowered = sanitized
-            replacements = [
-                ("[at]", "@"),
-                ("(at)", "@"),
-                (" at ", "@"),
-                ("\\s?\\[dot\\]\\s?", "."),
-                (" dotcom", ".com"),
-                (" dot ", "."),
-            ]
-            # apply simple replacements safely
-            for a, b in replacements:
-                try:
-                    lowered = re.sub(a, b, lowered, flags=re.IGNORECASE)
-                except re.error:
-                    # fallback to plain replace if replacement pattern fails
-                    lowered = lowered.replace(a, b)
+            # Optionally ignore code blocks (```...``` and inline `...`)
+            if cfg.get("ignore_code_blocks", True):
+                # Remove fenced code blocks and inline code
+                sanitized = re.sub(r"```[\s\S]*?```", "", sanitized)
+                sanitized = re.sub(r"`[^`]*`", "", sanitized)
 
-            # REMOVE DISCORD MENTIONS: user/nick/role/channel mentions (including possible missing closing '>')
-            # Patterns: <@123...>, <@!123...>, <@&123...>, <#123...>
-            try:
-                lowered = re.sub(r"<@!?\d+>?", "", lowered)
-                lowered = re.sub(r"<@&\d+>?", "", lowered)
-                lowered = re.sub(r"<#\d+>?", "", lowered)
-            except re.error:
-                # In the rare case regex fails, fallback to simple replacements for common prefixes
-                lowered = lowered.replace("<@", "")
-                lowered = lowered.replace("<#", "")
+            # Optionally strip mentions
+            normalized = sanitized
+            if cfg.get("strip_mentions", True):
+                normalized = re.sub(r"<@!?#?\d+>?", "", normalized)
 
-            # REMOVE URLs: strip http(s) URLs to avoid matching IDs inside links (e.g., webhook URLs)
-            try:
-                lowered = re.sub(r"https?://\S+", "", lowered, flags=re.IGNORECASE)
-            except re.error:
-                # fallback naive removal
-                lowered = lowered.replace("http://", "").replace("https://", "")
+            # Optionally strip URLs
+            if cfg.get("strip_urls", True):
+                normalized = re.sub(r"https?://\S+", "", normalized, flags=re.IGNORECASE)
 
-            # HOMOGLYPH NORMALIZATION: map common letters to digits for detection
-            # Create a normalized copy for detection only
-            normalized = lowered.translate(self._homoglyph_trans)
+            # Homoglyph mapping for detection — keep hex letters intact to not break IPv6
+            normalized = normalized.translate(self._homoglyph_trans)
 
-            # STRIP SPACES & PUNCTUATION: create numeric_text used for detection (only for remaining detectors)
-            # Remove spaces, dots, and dashes
-            numeric_text = re.sub(r"[ \\.\-]", "", normalized)
+            numeric_text = re.sub(r"[ \.\-]", "", normalized)
 
-            # Detection: gather flags and reasons to log
             detections: List[Tuple[str, str]] = []
 
-            # IPv4 detection:
-            for candidate in self._ipv4_candidate_re.findall(normalized):
-                # Extract numeric parts (split non-digit), expect 4 parts
-                parts = re.findall(r"\d+", candidate)
-                if len(parts) != 4:
-                    continue
-                try:
-                    octets = [int(p) for p in parts]
-                except ValueError:
-                    continue
-                # Validate each octet in 0-255
-                if all(0 <= o <= 255 for o in octets):
-                    # Reconstruct dotted IPv4 and validate via ipaddress for extra safety
-                    ipv4_str = ".".join(str(o) for o in octets)
-                    try:
-                        ipaddress.IPv4Address(ipv4_str)
-                        detections.append(("IPv4", ipv4_str))
-                        break  # no need to find more IPv4 candidates
-                    except Exception:
-                        # not a valid IPv4, continue searching
+            # IPv4 detection (strict)
+            if True:
+                for candidate in self._ipv4_candidate_re.findall(normalized):
+                    parts = re.findall(r"\d+", candidate)
+                    if len(parts) != 4:
+                        # optionally treat candidates in paranoid mode
+                        if cfg.get("detect_ipv4_candidates"):
+                            detections.append(("IPv4-like", candidate))
                         continue
+                    try:
+                        octets = [int(p) for p in parts]
+                    except ValueError:
+                        continue
+                    if all(0 <= o <= 255 for o in octets):
+                        ipv4_str = ".".join(str(o) for o in octets)
+                        try:
+                            ipaddress.IPv4Address(ipv4_str)
+                            detections.append(("IPv4", ipv4_str))
+                            break
+                        except Exception:
+                            if cfg.get("detect_ipv4_candidates"):
+                                detections.append(("IPv4-like", candidate))
+                            continue
 
-            # IPv6 detection:
+            # IPv6 detection
             if not any(d[0] == "IPv6" for d in detections):
                 for raw_candidate in self._ipv6_candidate_re.findall(normalized):
                     if ":" not in raw_candidate:
                         continue
-                    # Keep reasonable length to avoid CPU waste
                     if len(raw_candidate) > 128:
                         continue
-                    # Try validating via ipaddress
                     try:
                         candidate = raw_candidate.strip()
                         ipaddress.IPv6Address(candidate)
@@ -404,7 +336,7 @@ class AntiDoxxing(commands.Cog):
                     except Exception:
                         continue
 
-            # GPS detection (simple float-pair detection)
+            # GPS detection
             if not any(d[0] == "GPS" for d in detections):
                 for lat_s, lon_s in self._gps_candidate_re.findall(normalized):
                     try:
@@ -412,102 +344,116 @@ class AntiDoxxing(commands.Cog):
                         lon = float(lon_s)
                     except ValueError:
                         continue
-                    # Validate ranges: latitude [-90, 90], longitude [-180, 180]
                     if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
                         detections.append(("GPS", f"{lat},{lon}"))
                         break
 
-            # If nothing detected, return
+            # Optional detectors (phone/ssn/email) — conservative defaults off
+            if cfg.get("detect_phone", False) and not any(d[0] == "Phone" for d in detections):
+                for match in re.finditer(r"\d{10,11}", numeric_text):
+                    digits = match.group(0)
+                    if len(digits) == 10 or (len(digits) == 11 and digits.startswith("1")):
+                        detections.append(("Phone", digits))
+                        break
+
+            if cfg.get("detect_ssn", False) and not any(d[0] == "SSN" for d in detections):
+                for match in re.finditer(r"\d{9}", numeric_text):
+                    digits = match.group(0)
+                    area = digits[:3]
+                    group = digits[3:5]
+                    serial = digits[5:9]
+                    try:
+                        area_n = int(area)
+                    except ValueError:
+                        continue
+                    if area == "000" or area == "666" or area_n >= 900:
+                        continue
+                    if group == "00" or serial == "0000":
+                        continue
+                    detections.append(("SSN", digits))
+                    break
+
+            if cfg.get("detect_email", False) and not any(d[0] == "Email" for d in detections):
+                m = self._email_re.search(normalized)
+                if m:
+                    detections.append(("Email", m.group(0)))
+
             if not detections:
                 return
 
-            # Compute a simple score based on weights
-            score = 0.0
-            for dtype, _ in detections:
-                score += self._weights.get(dtype, 0.5)
-
-            # Decide action based on thresholds
-            if score >= reject_threshold:
+            # Score (simple sum of weights)
+            score = sum(self._weights.get(dtype, 0.5) for dtype, _ in detections)
+            # Decide action
+            quarantine_t = cfg.get("quarantine_threshold", 0.6)
+            reject_t = cfg.get("reject_threshold", 0.85)
+            if score >= reject_t:
                 action = "reject"
-            elif score >= quarantine_threshold:
+            elif score >= quarantine_t:
                 action = "quarantine"
             else:
                 action = "ignore"
 
-            # Build structured violation list for logs
+            sanitized_preview = sanitized[:1900]
             violation_lines = [f"- {dtype}: `{val}`" for dtype, val in detections]
 
-            # Take actions
             if action == "reject":
-                # Attempt to delete the offending message
                 deleted = False
                 try:
                     await message.delete()
                     deleted = True
                 except discord.Forbidden:
-                    log.exception("Missing permission to delete message in %s", message.guild)
+                    log.exception("Missing permission to delete message in %s", guild)
                 except discord.NotFound:
-                    # Message already deleted
                     deleted = True
                 except Exception:
                     log.exception("Unexpected error deleting message")
 
-                # Record violation and potentially auto-act
-                await self._record_violation_and_maybe_autoban(guild.id, message.author.id, auto_action_cfg, message)
+                # Escalation tracking (auto_action) — best-effort
+                await self._record_violation_and_maybe_autoban(guild.id, message.author.id, cfg.get("auto_action", {}), message)
 
-                # Send logs to configured targets
-                await self._send_logs(guild, message, violation_lines, sanitized, deleted, detections)
+                # Log to mod channel and global webhook
+                await self._send_logs(guild, message, violation_lines, sanitized_preview, deleted, detections, cfg)
 
             elif action == "quarantine":
-                # Do not delete but send detailed log for moderator review
-                await self._send_logs(guild, message, violation_lines, sanitized, deleted=False, detections=detections, quarantined=True)
-
-            else:
-                # Shouldn't get here because we returned earlier if detections empty
-                log.debug("Detection score below quarantine threshold; ignoring.")
+                await self._send_logs(guild, message, violation_lines, sanitized_preview, deleted=False, detections=detections, cfg=cfg, quarantined=True)
 
         except Exception:
-            # Top-level protection so the bot doesn't crash from unexpected input
             log.exception("Unhandled error in AntiDoxxing._process_message")
 
-    async def _send_logs(self, guild: discord.Guild, message: discord.Message, violation_lines: List[str], sanitized: str, deleted: bool = False, detections: Optional[List[Tuple[str, str]]] = None, quarantined: bool = False):
-        """Send logs to mod channel and/or global webhook. Webhook is a single global URL for all guilds."""
+    async def _send_logs(self, guild: discord.Guild, message: discord.Message, violation_lines: List[str], sanitized: str, deleted: bool = False, detections: Optional[List[Tuple[str, str]]] = None, cfg: Optional[dict] = None, quarantined: bool = False):
         try:
-            # Prepare human-friendly info
+            cfg = cfg or await self.config.guild(guild).all()
             author_str = f"{message.author} (ID: {message.author.id})"
             jump_url = f"https://discord.com/channels/{guild.id}/{message.channel.id}/{message.id}"
             status = "deleted" if deleted else ("quarantined" if quarantined else "detected")
 
-            log_text = (
+            # Build text log (sanitized by default)
+            body = (
                 f"AntiDoxxing: message {status} in #{message.channel.name} (ID: {message.channel.id})\n"
                 f"Guild: {guild.name} (ID: {guild.id})\n"
                 f"Author: {author_str}\n"
                 f"Reason(s):\n" + "\n".join(violation_lines) + "\n"
                 f"Original message content (sanitized copy):\n"
-                f"```{sanitized[:1900]}```\n"
+                f"```{sanitized}```\n"
                 f"Jump (may be unavailable if message deleted): {jump_url}"
             )
 
-            # Send to configured mod channel if present
+            # Send to guild mod channel if configured
             try:
-                mod_channel_id = await self.config.guild(guild).mod_channel()
+                mod_channel_id = cfg.get("mod_channel")
                 if mod_channel_id:
                     mod_channel = guild.get_channel(mod_channel_id) or self.bot.get_channel(mod_channel_id)
                     if mod_channel and isinstance(mod_channel, discord.TextChannel):
                         try:
-                            await mod_channel.send(log_text)
+                            await mod_channel.send(body)
                         except discord.Forbidden:
                             log.exception("Missing permission to send logs to mod channel %s", mod_channel)
                         except Exception:
                             log.exception("Failed to send mod log to channel")
-                    else:
-                        log.warning("Configured mod channel ID %s not found or not a text channel", mod_channel_id)
-                else:
-                    log.debug("No anti-dox mod channel configured for guild %s", guild.id)
             except Exception:
                 log.exception("Error while attempting to log anti-dox action to channel")
 
-            # Send to global webhook if configured
+            # Global webhook (bot owner set)
             try:
                 webhook_url = await self.config.webhook_url()
                 if webhook_url:
@@ -538,7 +484,6 @@ class AntiDoxxing(commands.Cog):
             log.exception("Error while preparing/sending logs")
 
     async def _post_webhook(self, url: str, payload: dict):
-        """POST a JSON payload to the configured webhook URL. Fire-and-forget with basic error handling."""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload, timeout=10) as resp:
@@ -548,41 +493,37 @@ class AntiDoxxing(commands.Cog):
             log.exception("Exception while posting to webhook %s", url)
 
     async def _record_violation_and_maybe_autoban(self, guild_id: int, user_id: int, auto_action_cfg: dict, message: discord.Message):
-        """Record a violation and perform auto_action if thresholds are exceeded."""
         try:
             key = (guild_id, user_id)
             now_ts = time.time()
             history = self._violation_history.get(key, [])
-            # purge old entries
             interval = auto_action_cfg.get("interval_minutes", 60) * 60
             history = [t for t in history if now_ts - t <= interval]
             history.append(now_ts)
             self._violation_history[key] = history
 
             required = auto_action_cfg.get("violations", 3)
-            action = auto_action_cfg.get("action", "temp_ban_24h")
+            action = auto_action_cfg.get("action", "none")
+
+            if required <= 0 or action == "none":
+                return
 
             if len(history) >= required:
-                # attempt action
                 guild = message.guild
                 member = guild.get_member(user_id)
                 if member is None:
-                    # cannot act if member not in cache
                     return
                 try:
                     if action == "kick":
                         await guild.kick(member)
                         log.info("Auto-action: kicked member %s in guild %s", user_id, guild_id)
                     elif action.startswith("temp_ban"):
-                        # parse optional duration in hours e.g. temp_ban_24h
                         hours = 24
                         m = re.search(r"temp_ban_(\d+)h", action)
                         if m:
                             hours = int(m.group(1))
                         await guild.ban(member, reason="Auto action by AntiDoxxing")
                         log.info("Auto-action: banned member %s in guild %s for %sh", user_id, guild_id, hours)
-
-                        # schedule unban after duration (best-effort; will not survive restarts)
                         asyncio.create_task(self._schedule_unban(guild, user_id, hours * 3600))
                     elif action == "ban":
                         await guild.ban(member, reason="Auto action by AntiDoxxing")
@@ -601,10 +542,8 @@ class AntiDoxxing(commands.Cog):
             log.exception("Error recording violation or performing auto action")
 
     async def _schedule_unban(self, guild: discord.Guild, user_id: int, delay_seconds: int):
-        """Unban a user after delay_seconds (best-effort)."""
         try:
             await asyncio.sleep(delay_seconds)
-            # attempt unban
             try:
                 user = await self.bot.fetch_user(user_id)
                 await guild.unban(user)
@@ -616,7 +555,6 @@ class AntiDoxxing(commands.Cog):
             except Exception:
                 log.exception("Unban: unexpected error for %s in guild %s", user_id, guild.id)
         except asyncio.CancelledError:
-            # task cancelled on shutdown
             return
         except Exception:
             log.exception("Error in _schedule_unban")
