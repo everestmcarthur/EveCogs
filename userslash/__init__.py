@@ -135,7 +135,8 @@ class UserSlash(commands.Cog):
         self, before: discord.User, after: discord.User
     ) -> None:
         """Update the slash-command name when the bot's username changes."""
-        assert self.bot.user
+        if not self.bot.user:
+            raise AssertionError
         if after.id != self.bot.user.id or before.name == after.name:
             return
 
