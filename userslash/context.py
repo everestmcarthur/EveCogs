@@ -63,7 +63,8 @@ class InterContext(commands.Context):
         try:
             self = contexts.get()
             if recreate_message:
-                assert self.prefix is not None
+                if self.prefix is None:
+                    raise AssertionError
                 self.message._recreate_from_interaction(interaction, prefix)
                 view = self.view = StringView(self.message.content)
                 view.skip_string(self.prefix)
@@ -155,7 +156,8 @@ class InterContext(commands.Context):
             command = self.bot.get_command(command) or command
         signature: str
         if signature := getattr(command, "signature", ""):
-            assert not isinstance(command, str)
+            if isinstance(command, str):
+                raise AssertionError()
             command = copy(command)
             command.usage = f"arguments:{signature}"
         return await super().send_help(command)

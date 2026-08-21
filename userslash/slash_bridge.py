@@ -357,7 +357,8 @@ async def _autocomplete(
 
 @user_slash_command.error
 async def _error(interaction: discord.Interaction, error: Exception):
-    assert isinstance(interaction.client, Red)
+    if not isinstance(interaction.client, Red):
+        raise AssertionError
 
     # Log the original error for debugging
     LOG.error(f"Slash command error for user {interaction.user.id}: {error}", exc_info=error)

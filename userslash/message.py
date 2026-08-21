@@ -49,7 +49,8 @@ class InterMessage(discord.Message):
     def _from_interaction(
         cls, interaction: discord.Interaction, prefix: str
     ) -> "InterMessage":
-        assert interaction.data
+        if not interaction.data:
+            raise AssertionError
         assert interaction.client.user
 
         self = cls.__new__(cls)
@@ -126,7 +127,8 @@ class InterMessage(discord.Message):
     @staticmethod
     def _make_dm_channel(interaction: discord.Interaction) -> discord.DMChannel:
         """Fabricate a minimal DMChannel when the real one is unavailable."""
-        assert interaction.client.user
+        if not interaction.client.user:
+            raise AssertionError
         user = interaction.user
         user_json = (
             user._to_minimal_user_json()
@@ -156,7 +158,8 @@ class InterMessage(discord.Message):
     def _recreate_from_interaction(
         self, interaction: discord.Interaction, prefix: str
     ) -> None:
-        assert interaction.data and interaction.client.user
+        if not (interaction.data and interaction.client.user):
+            raise AssertionError
 
         self.content = f"{prefix}{interaction.namespace.command}"
         if interaction.namespace.arguments:
